@@ -442,7 +442,7 @@ def dirty_repos(
     Gets list of dirty repos by shelling out to gdirtyrepos bash script
     """
     result = os.popen("gdirtyrepos").read()
-    typer.echo(f"Git repos with local changes: {result}")
+    typer.echo(f"Git repos with local changes:\n{result}")
     return result
 
 # -----------------------------------------------------

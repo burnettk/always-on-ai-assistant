@@ -210,7 +210,7 @@ class TyperAgent:
         response = prefix_prompt(
             prompt=response_prompt, prefix=prompt_prefix, no_prefix=True
         )
-        self.logger.info(f"🤖 Response: '{response}'")
+        self.logger.info(f"🤖 Spoken response: '{response}'")
         self.speak(response)
 
     def speak(self, text: str):

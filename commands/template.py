@@ -9,7 +9,7 @@ import random
 import string
 import shutil
 from datetime import datetime
-
+import requests  # Add requests library for HTTP requests
 import yaml
 
 app = typer.Typer()
@@ -819,6 +819,32 @@ def inspect_task(
         result = f"Task ID={task_dict['id']}, Name={task_dict['task_name']}, Priority={task_dict['priority']}, Status={task_dict['status']}, Created={task_dict['created_at']}"
     typer.echo(result)
     return result
+
+
+# -----------------------------------------------------
+# 31) get_failed_spacelift_stacks
+# -----------------------------------------------------
+@app.command()
+def get_failed_spacelift_stacks():
+    """
+    Gets the number of failing Spacelift stacks.
+    """
+    url = 'http://localhost:7000/v1.0/messages/chat?execution_mode=synchronous'
+    spiff_token = os.getenv('SPIFF_TOKEN')
+    headers = {
+        'Authorization': f'Bearer {spiff_token}',
+        'Content-Type': 'application/json'
+    }
+    response = requests.post(url, headers=headers, json={})
+    if response.status_code == 200:
+        response_data = response.json()
+        message = response_data.get('task_data', {}).get('response_string', 'No response string found.')
+        typer.echo(message)
+        return message
+    else:
+        error_msg = f"Failed to get data: {response.status_code} {response.text}"
+        typer.echo(error_msg)
+        return error_msg
 
 
 # -----------------------------------------------------

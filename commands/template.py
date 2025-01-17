@@ -825,7 +825,7 @@ def inspect_task(
 # 31) get_failed_spacelift_stacks
 # -----------------------------------------------------
 @app.command()
-def get_failed_spacelift_stacks():
+def get_failing_spacelift_stacks():
     """
     Gets the number of failing Spacelift stacks.
     """
@@ -835,12 +835,17 @@ def get_failed_spacelift_stacks():
         'Authorization': f'Bearer {spiff_token}',
         'Content-Type': 'application/json'
     }
-    response = requests.post(url, headers=headers, json={})
+    response = requests.post(url, headers=headers, json={"command_type": "get_failing_spacelift_stacks"})
     if response.status_code == 200:
         response_data = response.json()
         message = response_data.get('task_data', {}).get('response_string', 'No response string found.')
-        typer.echo(message)
-        return json.dumps({"verbatim_vocal_response": message})
+        json_response_string = json.dumps({"verbatim_vocal_response": message})
+
+        # this is what is actually used
+        typer.echo(json_response_string)
+
+        # this is ignored
+        return json_response_string
     else:
         error_msg = f"Failed to get data: {response.status_code} {response.text}"
         typer.echo(error_msg)

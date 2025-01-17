@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+function error_handler() {
+  >&2 echo "Exited with BAD EXIT CODE '${2}' in ${0} script at line: ${1}."
+  exit "$2"
+}
+trap 'error_handler ${LINENO} $?' ERR
+set -o errtrace -o errexit -o nounset -o pipefail
+
+cd ~/projects/github/sartography/sample-process-models
+aiderd site-administration/ada/ada.bpmn -m "please update the last script task in the process model so that the vocal response is simply the number of stacks, rather than a sentence describing the results"

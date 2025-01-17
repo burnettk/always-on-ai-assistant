@@ -840,7 +840,7 @@ def get_failed_spacelift_stacks():
         response_data = response.json()
         message = response_data.get('task_data', {}).get('response_string', 'No response string found.')
         typer.echo(message)
-        return message
+        return json.dumps({"verbatim_vocal_response": message})
     else:
         error_msg = f"Failed to get data: {response.status_code} {response.text}"
         typer.echo(error_msg)

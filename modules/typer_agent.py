@@ -1,6 +1,7 @@
 from typing import List
 import os
 import logging
+import json
 from datetime import datetime
 from modules.assistant_config import get_config
 from modules.utils import (
@@ -166,22 +167,51 @@ class TyperAgent:
                 self.logger.info(f"⚡ Executing command: `{command_with_prefix}`")
                 output = execute(command)
 
-                result = (
-                    f"\n\n## {assistant_name} Executed Command ({timestamp})\n\n"
-                    f"> Request: {text}\n\n"
-                    f"**{assistant_name}'s Command:** \n```bash\n{command_with_prefix}\n```\n\n"
-                    f"**Output:** \n```\n{output}```"
-                )
-                with open(scratchpad, "a") as f:
-                    f.write(result)
-                self.think_speak(f"Command generated and executed")
-                return output
+                # Check if output is JSON
+                try:
+                    output_json = json.loads(output)
+                    if "verbatim_vocal_response" in output_json:
+                        self.speak(output_json["verbatim_vocal_response"])
+                        return output_json["verbatim_vocal_response"]
+                    elif "vocal_response_input" in output_json:
+                        self.think_speak(output_json["vocal_response_input"])
+                        return output_json["vocal_response_input"]
+                    else:
+                        self.speak("Error: Required keys not found in JSON response")
+                        return "Error: Required keys not found in JSON response"
+                except json.JSONDecodeError:
+                    # Not JSON, proceed as usual
+                    result = (
+                        f"\n\n## {assistant_name} Executed Command ({timestamp})\n\n"
+                        f"> Request: {text}\n\n"
+                        f"**{assistant_name}'s Command:** \n```bash\n{command_with_prefix}\n```\n\n"
+                        f"**Output:** \n```\n{output}```"
+                    )
+                    with open(scratchpad, "a") as f:
+                        f.write(result)
+                    self.think_speak(f"Command generated and executed")
+                    return output
 
             elif mode == "execute-no-scratch":
                 self.logger.info(f"⚡ Executing command: `{command_with_prefix}`")
                 output = execute(command)
-                self.think_speak(f"Command generated and executed")
-                return output
+
+                # Check if output is JSON
+                try:
+                    output_json = json.loads(output)
+                    if "verbatim_vocal_response" in output_json:
+                        self.speak(output_json["verbatim_vocal_response"])
+                        return output_json["verbatim_vocal_response"]
+                    elif "vocal_response_input" in output_json:
+                        self.think_speak(output_json["vocal_response_input"])
+                        return output_json["vocal_response_input"]
+                    else:
+                        self.speak("Error: Required keys not found in JSON response")
+                        return "Error: Required keys not found in JSON response"
+                except json.JSONDecodeError:
+                    # Not JSON, proceed as usual
+                    self.think_speak(f"Command generated and executed")
+                    return output
 
             else:
                 self.think_speak(f"I had trouble running that command")

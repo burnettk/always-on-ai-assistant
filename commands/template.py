@@ -445,6 +445,17 @@ def dirty_repos(
     typer.echo(f"Git repos with local changes:\n{result}")
     return result
 
+@app.command()
+def update_spiff_process_model(
+):
+    """
+    Updates the spiff process model
+    """
+    result = os.popen("./bin/update_spiff_process_model").read()
+
+    typer.echo(f"Output from script: :\n{result}")
+    return result
+
 # -----------------------------------------------------
 # 10) upload_file
 # -----------------------------------------------------

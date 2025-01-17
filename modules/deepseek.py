@@ -9,10 +9,13 @@ load_dotenv()
 
 # Initialize DeepSeek client
 client = OpenAI(
+    # api_key=os.getenv("OPENAI_API_KEY")
     api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com/beta"
 )
 
 DEEPSEEK_V3_MODEL = "deepseek-chat"
+# DEEPSEEK_V3_MODEL = "gpt-4o-mini"
+# DEEPSEEK_V3_MODEL = "gpt-4o"
 
 
 def prompt(prompt: str, model: str = DEEPSEEK_V3_MODEL) -> str:

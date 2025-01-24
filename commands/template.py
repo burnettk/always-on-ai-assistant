@@ -864,6 +864,24 @@ def get_failing_spacelift_stacks():
 
 
 # -----------------------------------------------------
+# 32) create_config
+# -----------------------------------------------------
+@app.command()
+def create_config():
+    """
+    Creates a ~/.config/max directory if it doesn't exist.
+    """
+    config_dir = os.path.expanduser("~/.config/max")
+    if not os.path.exists(config_dir):
+        os.makedirs(config_dir)
+        result = f"Directory '{config_dir}' created."
+    else:
+        result = f"Directory '{config_dir}' already exists."
+    typer.echo(result)
+    return result
+
+
+# -----------------------------------------------------
 # Entry point
 # -----------------------------------------------------
 def main():

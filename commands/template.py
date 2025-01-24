@@ -436,14 +436,31 @@ def summarize_logs(
     return result
 
 @app.command()
-def dirty_repos(
-):
+def dirty_repos():
     """
     Gets list of dirty repos by shelling out to gdirtyrepos bash script
     """
     result = os.popen("gdirtyrepos").read()
     typer.echo(f"Git repos with local changes:\n{result}")
     return result
+
+@app.command()
+def change_dir(dir_full_path: str):
+    """
+    Changes to a directory and stores the current working directory
+    """
+    if not os.path.exists(dir_full_path):
+        typer.echo(f"Directory path {dir_full_path} does not exist")
+        return f"Directory path {dir_full_path} does not exist"
+    
+    # Store the new working directory
+    config_dir = os.path.expanduser("~/.config/max")
+    cwd_file = os.path.join(config_dir, "cwd")
+    with open(cwd_file, "w") as f:
+        f.write(dir_full_path)
+    
+    typer.echo(f"Changed to directory: {dir_full_path}")
+    return f"Changed to directory: {dir_full_path}"
 
 @app.command()
 def update_spiff_process_model(

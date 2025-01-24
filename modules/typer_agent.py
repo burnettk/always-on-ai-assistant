@@ -120,6 +120,16 @@ class TyperAgent:
             self.logger.error(f"❌ Error building prompt: {str(e)}")
             raise
 
+    def _get_dir_list(self) -> List[str]:
+        """Get list of directories from config file"""
+        dir_file = os.path.expanduser("~/.config/max/all_dirs")
+        if not os.path.exists(dir_file):
+            self.logger.error(f"Directory list file {dir_file} not found")
+            return []
+        
+        with open(dir_file, "r") as f:
+            return [line.strip() for line in f.readlines() if line.strip()]
+
     def process_text(
         self,
         text: str,
@@ -130,10 +140,25 @@ class TyperAgent:
     ) -> str:
         """Process text input and handle based on execution mode"""
         try:
-            # Build fresh prompt with current state
-            formatted_prompt = self.build_prompt(
-                typer_file, scratchpad, context_files, text
-            )
+            # Handle exact match case for directory change
+            if "change dir" in text.lower() or "change directory" in text.lower():
+                dirs = self._get_dir_list()
+                if not dirs:
+                    self.think_speak("No directories found in config")
+                    return "No directories found in config"
+                
+                # Add dirs to context for LLM to choose from
+                formatted_prompt = self.build_prompt(
+                    typer_file, 
+                    scratchpad, 
+                    context_files, 
+                    f"The argument to change_dir, the dir_full_path, should be a single directory intelligently picked from the directory list based on the user query. directory list: {', '.join(dirs)}. user query: {text}"
+                )
+            else:
+                # Normal processing
+                formatted_prompt = self.build_prompt(
+                    typer_file, scratchpad, context_files, text
+                )
 
             # Generate command using DeepSeek
             self.logger.info("🤖 Processing text with DeepSeek...")

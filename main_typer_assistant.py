@@ -26,6 +26,12 @@ def awaken(
     context_files: List[str] = typer.Option(
         [], "--context", "-c", help="List of context files"
     ),
+    llm: str = typer.Option(
+        "deepseek",
+        "--llm",
+        "-l",
+        help="Options: ('deepseek', 'gemini'). Which LLM to use. Defaults to 'deepseek'",
+    ),
     mode: str = typer.Option(
         "default",
         "--mode",
@@ -33,9 +39,9 @@ def awaken(
         help="Options: ('default', 'execute', 'execute-no-scratch'). Execution mode: default (no exec), execute (exec + scratch), execute-no-scratch (exec only)",
     ),
 ):
-    """Run STT interface that processes speech into typer commands"""
+    """Run STT interface that processes speech into typer commands using the specified LLM"""
     # Remove the list concatenation - pass scratchpad as a single string
-    assistant, typer_file, _ = TyperAgent.build_agent(typer_file, [scratchpad])
+    assistant, typer_file, _ = TyperAgent.build_agent(typer_file, [scratchpad], llm)
 
     print("🎤 Speak now... (press Ctrl+C to exit)")
 

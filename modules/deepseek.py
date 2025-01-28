@@ -10,8 +10,12 @@ load_dotenv()
 # Initialize DeepSeek client
 client = OpenAI(
     # api_key=os.getenv("OPENAI_API_KEY")
-    api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com/beta"
+    base_url="https://api.deepseek.com/beta",
+    api_key=os.getenv("DEEPSEEK_API_KEY"),
 )
+
+if not client.api_key:
+    raise ValueError("DEEPSEEK_API_KEY environment variable not set.")
 
 DEEPSEEK_V3_MODEL = "deepseek-chat"
 # DEEPSEEK_V3_MODEL = "gpt-4o-mini"

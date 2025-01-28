@@ -16,14 +16,17 @@ from elevenlabs.client import ElevenLabs
 import time
 
 
+from modules.gemini import conversational_prompt as gemini_conversational_prompt
+
 class TyperAgent:
-    def __init__(self, logger: logging.Logger, session_id: str):
+    def __init__(self, logger: logging.Logger, session_id: str, llm: str):
         self.logger = logger
         self.session_id = session_id
         self.log_file = build_file_name_session("session.log", session_id)
         self.elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVEN_API_KEY"))
         self.previous_successful_requests = []
         self.previous_responses = []
+        self.llm = llm
 
     def _validate_markdown(self, file_path: str) -> bool:
         """Validate that file is markdown and has expected structure"""
@@ -43,7 +46,7 @@ class TyperAgent:
             return False
 
     @classmethod
-    def build_agent(cls, typer_file: str, scratchpad: List[str]):
+    def build_agent(cls, typer_file: str, scratchpad: List[str], llm: str ):
         """Create and configure a new TyperAssistant instance"""
         session_id = create_session_logger_id()
         logger = setup_logging(session_id)
@@ -54,11 +57,24 @@ class TyperAgent:
             raise FileNotFoundError(f"Typer file {typer_file} does not exist")
 
         # Validate markdown scratchpad
-        agent = cls(logger, session_id)
+        agent = cls(logger, session_id, llm)
         if scratchpad and not agent._validate_markdown(scratchpad[0]):
             raise ValueError(f"Invalid markdown scratchpad file: {scratchpad[0]}")
 
         return agent, typer_file, scratchpad[0]
+    
+    def _get_llm_response(self, formatted_prompt: str, prefix: str = "") -> str:
+        """Get response from the selected LLM"""
+        if self.llm == "deepseek":
+            if not os.getenv("DEEPSEEK_API_KEY"):
+                raise ValueError("DEEPSEEK_API_KEY environment variable not set.")
+            return prefix_prompt(prompt=formatted_prompt, prefix=prefix)
+        elif self.llm == "gemini":
+            if not os.getenv("GEMINI_API_KEY"):
+                raise ValueError("GEMINI_API_KEY environment variable not set.")
+            return gemini_conversational_prompt(messages=[{"role": "user", "content": formatted_prompt}])
+        else:
+            raise ValueError(f"Invalid LLM: {self.llm}")
 
     def build_prompt(
         self,
@@ -160,10 +176,10 @@ class TyperAgent:
                     typer_file, scratchpad, context_files, text
                 )
 
-            # Generate command using DeepSeek
-            self.logger.info("🤖 Processing text with DeepSeek...")
+            # Generate command using the selected LLM
+            self.logger.info(f"🤖 Processing text with {self.llm}...")
             prefix = f"uv run python {typer_file}"
-            command = prefix_prompt(prompt=formatted_prompt, prefix=prefix)
+            command = self._get_llm_response(formatted_prompt, prefix)
 
             if command == prefix.strip():
                 self.logger.info(f"🤖 Command not found for '{text}'")
@@ -262,9 +278,17 @@ class TyperAgent:
             "{{personal_ai_assistant_name}}", assistant_name
         )
         prompt_prefix = f"Your Conversational Response: "
-        response = prefix_prompt(
-            prompt=response_prompt, prefix=prompt_prefix, no_prefix=True
-        )
+        if self.llm == "deepseek":
+            response = prefix_prompt(
+                prompt=response_prompt, prefix=prompt_prefix, no_prefix=True
+            )
+        elif self.llm == "gemini":
+            response = gemini_conversational_prompt(
+                messages=[{"role": "user", "content": response_prompt}]
+            )
+        else:
+            raise ValueError(f"Invalid LLM: {self.llm}")
+
         self.logger.info(f"🤖 Spoken response: '{response}'")
         self.speak(response)
 

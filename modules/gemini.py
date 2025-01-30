@@ -65,3 +65,20 @@ def conversational_prompt(
         return response
     except Exception as e:
         raise Exception(f"Error in conversational prompt: {str(e)}")
+
+def prompt(prompt_text: str) -> str:
+    """
+    Send a prompt to Gemini.
+
+    Args:
+        prompt_text: The prompt text.
+
+    Returns:
+        The response from Gemini.
+    """
+    try:
+        messages = [{"role": "user", "content": prompt_text}]
+        response = conversational_prompt(messages)
+        return response
+    except Exception as e:
+        raise Exception(f"Error in prompt: {str(e)}")

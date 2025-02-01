@@ -16,7 +16,7 @@ client = OpenAI(
 if not client.api_key:
     raise ValueError("OPENROUTER_API_KEY environment variable not set.")
 
-DEEPSEEK_V3_MODEL = "openrouter/deepseek/deepseek-chat"
+DEEPSEEK_V3_MODEL = "deepseek/deepseek-chat"
 # DEEPSEEK_V3_MODEL = "gpt-4o-mini"
 # DEEPSEEK_V3_MODEL = "gpt-4o"
 

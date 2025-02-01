@@ -29,7 +29,7 @@ def prompt(prompt: str, model: str = DEEPSEEK_V3_MODEL) -> str:
         model=model,
         messages=[{"role": "user", "content": prompt}],
         stream=False,
-        headers={"HTTP-Referer": "https://github.com/your-repo"},  # OpenRouter requires this
+        extra_headers={"HTTP-Referer": "https://github.com/your-repo"},  # OpenRouter requires this
     )
     return response.choices[0].message.content
 
@@ -68,7 +68,7 @@ def json_prompt(prompt: str, model: str = DEEPSEEK_V3_MODEL) -> dict:
         model=model,
         messages=messages,
         response_format={"type": "json_object"},
-        headers={"HTTP-Referer": "https://github.com/your-repo"},
+        extra_headers={"HTTP-Referer": "https://github.com/your-repo"},
     )
     return json.loads(response.choices[0].message.content)
 
@@ -95,7 +95,7 @@ def prefix_prompt(
     response = client.chat.completions.create(
         model=model,
         messages=messages,
-        headers={"HTTP-Referer": "https://github.com/your-repo"},
+        extra_headers={"HTTP-Referer": "https://github.com/your-repo"},
     )
     if no_prefix:
         return response.choices[0].message.content
@@ -153,7 +153,7 @@ def conversational_prompt(
             model=model,
             messages=messages,
             stream=False,
-            headers={"HTTP-Referer": "https://github.com/your-repo"},
+            extra_headers={"HTTP-Referer": "https://github.com/your-repo"},
         )
         return response.choices[0].message.content
     except Exception as e:

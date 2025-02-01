@@ -1,7 +1,8 @@
 import os
 import json
-from modules.deepseek import prompt as deepseek_prompt
-from modules.gemini import prompt as gemini_prompt
+from modules.openrouter import prompt as openrouter_prompt
+# from modules.deepseek import prompt as deepseek_prompt
+# from modules.gemini import prompt as gemini_prompt
 import glob
 
 def run_benchmarks(llm: str):
@@ -21,12 +22,13 @@ def run_benchmarks(llm: str):
         with open(prompt_file, "r") as f:
             prompt_text = f.read().strip()
 
-        if llm == "deepseek":
-            actual_output = deepseek_prompt(prompt_text).strip()
-        elif llm == "gemini":
-            actual_output = gemini_prompt(prompt_text).strip()
-        else:
-            raise ValueError(f"Invalid LLM: {llm}")
+        actual_output = openrouter_prompt(prompt_text).strip()
+        # if llm == "deepseek":
+        #     actual_output = deepseek_prompt(prompt_text).strip()
+        # elif llm == "gemini":
+        #     actual_output = gemini_prompt(prompt_text).strip()
+        # else:
+        #     raise ValueError(f"Invalid LLM: {llm}")
 
         with open(expected_output_file, "r") as f:
             expected_output = f.read().strip()

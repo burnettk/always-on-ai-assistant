@@ -72,6 +72,7 @@ def check_result_for_error(result, operation_description):
 def main():
     parser = argparse.ArgumentParser(description=f"Start and complete the '{PROCESS_MODEL_ID}' process.")
     parser.add_argument("client", help="The client associated with the task.")
+    parser.add_argument("project", help="The project associated with the task.")
     parser.add_argument("summary", help="The summary to include in the task.")
     parser.add_argument("start_date_time", help="Start time in ISO 8601 format (e.g., YYYY-MM-DDTHH:MM:SS).")
     parser.add_argument("end_time", help="End time in ISO 8601 format (e.g., YYYY-MM-DDTHH:MM:SS).")
@@ -150,6 +151,7 @@ def main():
     print(f"Completing User Task {task_id}...")
     task_data = {
         "client": args.client,
+        "project": args.project,
         "summary": args.summary,
         "start_date_time": args.start_date_time,
         "end_time": args.end_time,

@@ -1,10 +1,15 @@
 
 import logging
 # Setup basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.getLogger("httpx").setLevel(logging.ERROR)
+logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
 import litellm
+# Reduce litellm verbosity
+litellm.suppress_debug_info = True
+
 import json
 import os
 import inspect
@@ -32,11 +37,6 @@ USE_ELEVENLABS_TTS = False  # Global flag, set by CLI
 SAY_COMMAND_AVAILABLE = None # To cache whether 'say' command exists
 
 
-# Reduce litellm verbosity
-litellm.suppress_debug_info = True
-logging.getLogger("LiteLLM").setLevel(logging.ERROR)
-# You might also want to silence httpx if it becomes noisy with litellm calls
-# logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 # --- ElevenLabs Client ---
@@ -417,7 +417,7 @@ def main_assistant_loop():
     # Add our desired handler
     app_handler = logging.StreamHandler() # Defaults to sys.stderr
     # Use the same format as basicConfig
-    app_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    app_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     app_handler.setFormatter(app_formatter)
     # The handler will respect the logger's level (INFO), 
     # so no need to setLevel on handler unless a more restrictive level is needed for this specific handler.

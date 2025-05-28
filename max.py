@@ -12,15 +12,20 @@ from RealtimeSTT import AudioToTextRecorder
 from elevenlabs import play, Voice, VoiceSettings
 from elevenlabs.client import ElevenLabs
 import logging
+import subprocess
+import shutil
 
 # --- Configuration ---
 CWD_FILE = Path.home() / ".config" / "max" / "cwd"
 ASSISTANT_NAME = "Max"
 WAKE_WORD = "max"  # Case-insensitive check
-LITELLM_MODEL = os.getenv("LITELLM_MODEL", "gpt-4o")
+LITELLM_MODEL = os.getenv("LITELLM_MODEL", "gemini/gemini-2.0-flash-lite")
 ELEVENLABS_API_KEY = os.getenv("ELEVEN_API_KEY")
 # LiteLLM uses various keys like OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.
 # Ensure the relevant key for LITELLM_MODEL is set in the environment.
+
+USE_ELEVENLABS_TTS = False  # Global flag, set by CLI
+SAY_COMMAND_AVAILABLE = None # To cache whether 'say' command exists
 
 # Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -102,30 +107,60 @@ def get_current_directory() -> str:
         logger.error(f"Error accessing CWD file {CWD_FILE}: {e}. Falling back to home directory.")
         return str(Path.home())
 
+def check_say_command():
+    """Checks if the 'say' command is available and caches the result."""
+    global SAY_COMMAND_AVAILABLE
+    if SAY_COMMAND_AVAILABLE is None: # Check only once
+        SAY_COMMAND_AVAILABLE = shutil.which("say") is not None
+        if SAY_COMMAND_AVAILABLE:
+            logger.info("TTS: 'say' command is available.")
+        else:
+            logger.warning("TTS: 'say' command not found. Console print will be used if ElevenLabs is not active or fails.")
 
 def speak(text: str):
-    """Uses ElevenLabs TTS to speak the given text or prints to console if client not available."""
-    if not elevenlabs_client:
-        print(f"{ASSISTANT_NAME}: {text}")
-        logger.info(f"TTS (simulated): {text}")
-        return
+    """Speaks the given text using ElevenLabs (if enabled and available) or 'say' command, otherwise prints to console."""
+    global USE_ELEVENLABS_TTS, SAY_COMMAND_AVAILABLE
 
-    try:
-        logger.info(f"Attempting to speak: {text}")
-        voice_id = os.getenv("ELEVENLABS_VOICE_ID", 'pNInz6obpgDQGcFmaJgB') # Default example voice
-        audio = elevenlabs_client.generate(
-            text=text,
-            voice=Voice(
-                voice_id=voice_id,
-                settings=VoiceSettings(stability=0.7, similarity_boost=0.6, style=0.0, use_speaker_boost=True)
-            ),
-            model=os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2") # Fast model
-        )
-        play(audio)
-        logger.info(f"Spoke: {text}")
-    except Exception as e:
-        logger.error(f"Error during TTS playback: {e}")
-        print(f"{ASSISTANT_NAME} (TTS Error): {text}") # Fallback to print
+    if USE_ELEVENLABS_TTS:
+        if elevenlabs_client:
+            try:
+                logger.info(f"Attempting to speak with ElevenLabs: \"{text}\"")
+                voice_id = os.getenv("ELEVENLABS_VOICE_ID", 'pNInz6obpgDQGcFmaJgB') # Default example voice
+                audio = elevenlabs_client.generate(
+                    text=text,
+                    voice=Voice(
+                        voice_id=voice_id,
+                        settings=VoiceSettings(stability=0.7, similarity_boost=0.6, style=0.0, use_speaker_boost=True)
+                    ),
+                    model=os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2") # Fast model
+                )
+                play(audio)
+                logger.info(f"Spoke with ElevenLabs: \"{text}\"")
+                return
+            except Exception as e:
+                logger.error(f"ElevenLabs TTS failed: {e}. Falling back.")
+        else:
+            logger.warning("ElevenLabs TTS requested via --elevenlabs, but client not available (e.g., API key missing). Falling back.")
+
+    # Fallback to 'say' command or print
+    # SAY_COMMAND_AVAILABLE should have been initialized by check_say_command() in cli_main.
+    # If it's somehow None here, check_say_command() inside would log a warning if 'say' is not found.
+    if SAY_COMMAND_AVAILABLE is None:
+        check_say_command() # Defensive check, normally already called.
+
+    if SAY_COMMAND_AVAILABLE:
+        try:
+            # Using capture_output to prevent 'say' from writing to stdout/stderr unless it's an error we want to log.
+            # However, 'say' typically doesn't output on success.
+            subprocess.run(["say", text], check=True, capture_output=True, text=True)
+            logger.info(f"TTS (say): \"{text}\"")
+            return
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            logger.error(f"TTS with 'say' command failed: {e}. Falling back to print.")
+    
+    # Final fallback: print to console
+    print(f"{ASSISTANT_NAME}: {text}")
+    logger.info(f"TTS (console print): \"{text}\"")
 
 # --- Tool Functions ---
 @tool_function
@@ -340,9 +375,8 @@ def process_transcription(transcribed_text: str):
 def main_assistant_loop():
     """Initializes STT and runs the main loop for voice interaction."""
     global _recorder_instance
-    if not ELEVENLABS_API_KEY and not os.getenv("ELEVENLABS_VOICE_ID"): # Check if TTS is likely to work
-        logger.warning("ElevenLabs API Key or Voice ID might not be set. TTS quality may be affected or fail.")
-        # Allow to proceed, speak() has console fallback.
+    # Warnings about ElevenLabs API key or 'say' command availability are handled
+    # in cli_main or by the speak() function's fallbacks.
 
     ensure_tools_loaded() # Load tools at startup
 
@@ -388,7 +422,22 @@ def cli_main():
         action="store_true",
         help="Dump the tool call metadata (JSON schemas for functions) and exit.",
     )
+    parser.add_argument(
+        "--elevenlabs",
+        action="store_true",
+        help="Use ElevenLabs for Text-to-Speech instead of the default 'say' command (macOS).",
+    )
     args = parser.parse_args()
+
+    global USE_ELEVENLABS_TTS
+    if args.elevenlabs:
+        USE_ELEVENLABS_TTS = True
+        logger.info("ElevenLabs TTS explicitly enabled via --elevenlabs flag.")
+        if not ELEVENLABS_API_KEY: # elevenlabs_client would be None
+            logger.warning("ElevenLabs TTS enabled, but ELEVEN_API_KEY is not set. TTS may fail or fall back.")
+    
+    # Initialize say command check early, so its availability is known before the first speak() call.
+    check_say_command()
 
     if args.tools:
         ensure_tools_loaded() # Ensure tools are discovered

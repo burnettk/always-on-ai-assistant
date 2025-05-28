@@ -25,6 +25,7 @@ import subprocess
 import shutil
 
 # --- Configuration ---
+MAGIC_QUERY_PARAM_NAME = "full_user_query"
 CWD_FILE = Path.home() / ".config" / "max" / "cwd"
 ASSISTANT_NAME = "Max"
 WAKE_WORD = "max"  # Case-insensitive check
@@ -55,28 +56,38 @@ def tool_function(func: Callable) -> Callable:
 
 def get_function_schema(func: Callable) -> Dict[str, Any]:
     """Generates a JSON schema for a function's parameters using Pydantic."""
+    
+    func_name = func.__name__
+    description = inspect.getdoc(func) or f"Executes the {func_name} action."
+    
     sig = inspect.signature(func)
     param_fields = {}
     for name, param in sig.parameters.items():
+        if name == MAGIC_QUERY_PARAM_NAME:
+            continue # Skip magic parameter for schema generation
+
         annotation = param.annotation
         if annotation == inspect.Parameter.empty:
-            raise ValueError(f"Missing type annotation for parameter '{name}' in function '{func.__name__}'")
+            raise ValueError(f"Missing type annotation for parameter '{name}' in function '{func_name}'")
         
         default_value = param.default if param.default != inspect.Parameter.empty else ...
         param_fields[name] = (annotation, default_value)
 
+    # create_model handles empty param_fields correctly, 
+    # resulting in a schema with 'type': 'object' and 'properties': {}
     parameters_model = create_model(
-        f"{func.__name__}Params", 
+        f"{func_name}Params", 
         **param_fields,
         __base__=BaseModel
     )
+    parameters_json_schema = parameters_model.model_json_schema()
     
     schema = {
         "type": "function",
         "function": {
-            "name": func.__name__,
-            "description": inspect.getdoc(func) or f"Executes the {func.__name__} action.", # Default description
-            "parameters": parameters_model.model_json_schema()
+            "name": func_name,
+            "description": description,
+            "parameters": parameters_json_schema
         }
     }
     return schema
@@ -195,7 +206,7 @@ def what_is_your_name():
     return f"My name is {ASSISTANT_NAME}."
 
 @tool_function
-def add_file(user_query_for_filename: str):
+def add_file(full_user_query: str): # Renamed parameter
     """
     Identifies a file to add based on user query and files in the current directory, then simulates adding it.
     This function lists files in the current directory.
@@ -217,7 +228,7 @@ def add_file(user_query_for_filename: str):
 
     items_list_str = ", ".join(items_in_dir) if items_in_dir else "none"
     prompt_for_file_selection = (
-        f"The user wants to add a file or item. Their original request was: '{user_query_for_filename}'.\n"
+        f"The user wants to add a file or item. Their original request was: '{full_user_query}'.\n" # Updated variable name
         f"The items currently available in '{current_dir_path_str}' are: [{items_list_str}].\n"
         f"Based on the user's request and the available items, what is the exact name of the single file or directory they most likely mean? "
         f"If the user seems to be referring to a new file that doesn't exist, provide the name for the new file. "
@@ -237,7 +248,7 @@ def add_file(user_query_for_filename: str):
         logger.info(f"LLM suggested item name: '{selected_item_name}'")
 
         if selected_item_name.upper() == "UNCLEAR" or not selected_item_name:
-            return f"I'm not sure which file or item you mean from your request: '{user_query_for_filename}'. Could you be more specific?"
+            return f"I'm not sure which file or item you mean from your request: '{full_user_query}'. Could you be more specific?" # Updated variable name
         
         target_path = current_dir / selected_item_name
         
@@ -338,9 +349,11 @@ def process_transcription(transcribed_text: str):
                     args_str = tool_call.function.arguments
                     args_dict = json.loads(args_str)
                     
-                    # Ensure 'add_file' gets the original user query for its internal LLM call
-                    if function_name == "add_file":
-                        args_dict["user_query_for_filename"] = user_query
+                    # Inject full user query if the function expects it via the magic parameter name
+                    func_sig = inspect.signature(function_to_call)
+                    if MAGIC_QUERY_PARAM_NAME in func_sig.parameters:
+                        args_dict[MAGIC_QUERY_PARAM_NAME] = user_query
+                        logger.info(f"Injected magic param '{MAGIC_QUERY_PARAM_NAME}' for {function_name}")
                     
                     logger.info(f"Calling tool: {function_name} with args: {args_dict}")
                     tool_response_content = function_to_call(**args_dict)

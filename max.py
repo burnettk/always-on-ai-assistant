@@ -376,12 +376,10 @@ def process_transcription(transcribed_text: str):
             if final_content: speak(final_content)
             else: speak("Done.") # Fallback if LLM gives no summary
 
-        elif response_message.content:
-            logger.info(f"LLM returned direct response: {response_message.content}")
-            speak(response_message.content)
-        else:
-            logger.warning("LLM returned no tool calls and no content.")
-            speak("I'm not quite sure how to help with that.")
+        else: # No tool_calls
+            logger.info("LLM did not return any tool calls. User query will be ignored as no tool was selected.")
+            # No speak() call here, effectively ignoring the query.
+            return
 
     except Exception as e:
         logger.error(f"Error in LLM completion or tool processing: {e}", exc_info=True)

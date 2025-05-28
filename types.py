@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 from typing import Optional
 import inspect
 import json
@@ -31,9 +31,27 @@ def get_function_schema(func):
     return {
         "name": func.__name__,
         "description": func.__doc__,
-        "parameters": json.loads(BaseModel.model_creator(func.__name__, **params).schema_json())
+        "parameters": create_model(func.__name__ + 'Params', **params).model_json_schema()
     }
 
 function_schema = get_function_schema(get_user_info)
 print(json.dumps(function_schema, indent=2))
 
+# returns:
+# {
+#   "name": "get_user_info",
+#   "description": "Fetches user information from the database.",
+#   "parameters": {
+#     "properties": {
+#       "user_id": {
+#         "title": "User Id",
+#         "type": "integer"
+#       }
+#     },
+#     "required": [
+#       "user_id"
+#     ],
+#     "title": "get_user_infoParams",
+#     "type": "object"
+#   }
+# }

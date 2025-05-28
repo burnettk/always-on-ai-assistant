@@ -1,4 +1,9 @@
 
+import logging
+# Setup basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 import litellm
 import json
 import os
@@ -11,7 +16,6 @@ from pathlib import Path
 from RealtimeSTT import AudioToTextRecorder
 from elevenlabs import play, Voice, VoiceSettings
 from elevenlabs.client import ElevenLabs
-import logging
 import subprocess
 import shutil
 
@@ -27,9 +31,6 @@ ELEVENLABS_API_KEY = os.getenv("ELEVEN_API_KEY")
 USE_ELEVENLABS_TTS = False  # Global flag, set by CLI
 SAY_COMMAND_AVAILABLE = None # To cache whether 'say' command exists
 
-# Setup basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 # Reduce litellm verbosity
 litellm.suppress_debug_info = True
@@ -402,6 +403,29 @@ def main_assistant_loop():
         logger.error(f"Failed to initialize AudioToTextRecorder: {e}. Voice assistant cannot start.")
         print(f"Error: Could not start audio recorder. Ensure microphone is available and permissions are set. Details: {e}")
         return
+
+    # Re-assert logging configuration for the application's logger
+    # This helps ensure our logs appear as intended, even if libraries modify root logging settings.
+    logger.setLevel(logging.INFO) # Set desired level for our logger
+
+    # Remove any handlers that might have been attached to this specific logger by other libraries,
+    # or to reset its handlers to a known state.
+    if logger.hasHandlers():
+        for handler in logger.handlers[:]: # Iterate over a copy of the list
+            logger.removeHandler(handler)
+
+    # Add our desired handler
+    app_handler = logging.StreamHandler() # Defaults to sys.stderr
+    # Use the same format as basicConfig
+    app_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    app_handler.setFormatter(app_formatter)
+    # The handler will respect the logger's level (INFO), 
+    # so no need to setLevel on handler unless a more restrictive level is needed for this specific handler.
+    logger.addHandler(app_handler)
+
+    # Prevent messages from this logger from propagating to the root logger.
+    # This is important if the root logger's handlers have been altered by libraries.
+    logger.propagate = False
         
     logger.info(f"'{ASSISTANT_NAME}' is listening... Say '{WAKE_WORD}' followed by your command.")
     speak(f"Hello! I'm {ASSISTANT_NAME}. How can I assist you today?")

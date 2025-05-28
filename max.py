@@ -41,13 +41,7 @@ SAY_COMMAND_AVAILABLE = None # To cache whether 'say' command exists
 
 # --- ElevenLabs Client ---
 elevenlabs_client = None
-if ELEVENLABS_API_KEY:
-    try:
-        elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-    except Exception as e:
-        logger.error(f"Failed to initialize ElevenLabs client: {e}")
-else:
-    logger.info("ElevenLabs API key not found. TTS will be disabled; responses will be printed to console.")
+# Initialization will be handled in cli_main based on --elevenlabs flag
 
 # --- Tool Definition and Schema Generation ---
 _tool_functions: Dict[str, Callable] = {}
@@ -461,11 +455,21 @@ def cli_main():
     args = parser.parse_args()
 
     global USE_ELEVENLABS_TTS
+    global elevenlabs_client # Allow modification of the global client
+
     if args.elevenlabs:
         USE_ELEVENLABS_TTS = True
         logger.info("ElevenLabs TTS explicitly enabled via --elevenlabs flag.")
-        if not ELEVENLABS_API_KEY: # elevenlabs_client would be None
-            logger.warning("ElevenLabs TTS enabled, but ELEVEN_API_KEY is not set. TTS may fail or fall back.")
+        if ELEVENLABS_API_KEY:
+            try:
+                elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+                logger.info("ElevenLabs client initialized successfully.")
+            except Exception as e:
+                logger.error(f"Failed to initialize ElevenLabs client: {e}. ElevenLabs TTS will not be available.")
+                USE_ELEVENLABS_TTS = False # Disable if client fails to init
+        else:
+            logger.warning("ElevenLabs TTS enabled via flag, but ELEVEN_API_KEY is not set. ElevenLabs TTS will not be available.")
+            USE_ELEVENLABS_TTS = False # Disable if no API key
     
     # Initialize say command check early, so its availability is known before the first speak() call.
     check_say_command()

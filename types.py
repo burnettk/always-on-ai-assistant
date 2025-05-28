@@ -2,12 +2,20 @@ from pydantic import BaseModel, create_model
 from typing import Optional
 import inspect
 import json
+import sys
 
 class User(BaseModel):
     name: str
     age: int
     city: Optional[str] = None
 
+# Decorator to mark functions as excellent tools
+def excellent_tool(func):
+    """Marks a function as an excellent tool."""
+    func._is_excellent_tool = True
+    return func
+
+@excellent_tool
 def get_user_info(user_id: int) -> User:
     """Fetches user information from the database."""
     # Simulate database lookup
@@ -34,24 +42,33 @@ def get_function_schema(func):
         "parameters": create_model(func.__name__ + 'Params', **params).model_json_schema()
     }
 
-function_schema = get_function_schema(get_user_info)
-print(json.dumps(function_schema, indent=2))
+if __name__ == "__main__":
+    tool_schemas = []
+    current_module = sys.modules[__name__]
+    for name, member in inspect.getmembers(current_module):
+        if inspect.isfunction(member) and hasattr(member, '_is_excellent_tool'):
+            schema = get_function_schema(member)
+            tool_schemas.append(schema)
 
-# returns:
-# {
-#   "name": "get_user_info",
-#   "description": "Fetches user information from the database.",
-#   "parameters": {
-#     "properties": {
-#       "user_id": {
-#         "title": "User Id",
-#         "type": "integer"
-#       }
-#     },
-#     "required": [
-#       "user_id"
-#     ],
-#     "title": "get_user_infoParams",
-#     "type": "object"
+    print(json.dumps(tool_schemas, indent=2))
+
+# Expected output (assuming get_user_info is the only decorated function):
+# [
+#   {
+#     "name": "get_user_info",
+#     "description": "Fetches user information from the database.",
+#     "parameters": {
+#       "properties": {
+#         "user_id": {
+#           "title": "User Id",
+#           "type": "integer"
+#         }
+#       },
+#       "required": [
+#         "user_id"
+#       ],
+#       "title": "get_user_infoParams",
+#       "type": "object"
+#     }
 #   }
-# }
+# ]

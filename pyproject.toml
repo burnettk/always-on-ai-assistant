@@ -23,4 +23,6 @@ dependencies = [
     "elevenlabs>=1.50.3",
     "realtimetts[system]==0.4.40",
     "pyttsx3>=2.98",
+    "litellm>=1.71.1",
+    "numpydoc>=1.8.0",
 ]

@@ -31,6 +31,13 @@ SAY_COMMAND_AVAILABLE = None # To cache whether 'say' command exists
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Reduce litellm verbosity
+litellm.suppress_debug_info = True
+logging.getLogger("LiteLLM").setLevel(logging.ERROR)
+# You might also want to silence httpx if it becomes noisy with litellm calls
+# logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
 # --- ElevenLabs Client ---
 elevenlabs_client = None
 if ELEVENLABS_API_KEY:
@@ -279,7 +286,7 @@ def process_transcription(transcribed_text: str):
         logger.debug(f"Wake word '{WAKE_WORD}' not detected.")
         return
 
-    speak("Yes?") # Acknowledge wake word
+    # speak("Yes?") # Acknowledge wake word
     
     try:
         # Attempt to extract query part after the wake word

@@ -223,11 +223,42 @@ def add_file(full_user_query: str): # Renamed parameter
         return f"Error: The current directory '{current_dir_path_str}' is not valid."
 
     try:
-        # List both files and directories, as "add file" might refer to a directory in some contexts
-        items_in_dir = [item.name for item in current_dir.iterdir()]
-    except Exception as e:
-        logger.error(f"Error listing items in {current_dir_path_str}: {e}")
-        return f"Sorry, I couldn't list items in the current directory. Error: {str(e)}"
+        # Use git ls-files to get a list of tracked files in the current directory.
+        # This respects .gitignore and only lists files (not directories).
+        # The command is run in current_dir_path_str, so paths are relative to it.
+        process = subprocess.run(
+            ["git", "ls-files"], 
+            cwd=current_dir_path_str,
+            capture_output=True,
+            text=True,
+            check=True  # Will raise CalledProcessError if git command fails
+        )
+        
+        relative_file_paths = process.stdout.splitlines()
+        
+        items_in_dir = []
+        for rel_path_str in relative_file_paths:
+            # A path like "file.txt" has parent ".", "subdir/file.txt" has parent "subdir"
+            # We only want files directly in the current directory.
+            path_obj = Path(rel_path_str)
+            if path_obj.parent == Path('.'): 
+                # Ensure it's a file, not a submodule entry or other non-file tracked item
+                if (current_dir / path_obj).is_file():
+                    items_in_dir.append(path_obj.name)
+        
+    except subprocess.CalledProcessError as e:
+        # This typically means current_dir is not a git repo or git command failed.
+        if "not a git repository" in e.stderr.lower():
+            logger.warning(f"Directory {current_dir_path_str} is not a git repository. Cannot use git ls-files.")
+            return f"The current directory '{current_dir_path_str}' is not a Git repository. I can only list files from Git-tracked directories for this command."
+        logger.error(f"Error running 'git ls-files' in {current_dir_path_str}: {e.stderr}")
+        return f"Sorry, I couldn't list files using Git. Git command failed: {e.stderr}"
+    except FileNotFoundError: # git command itself not found
+        logger.error("'git' command not found. Cannot list files using git ls-files.")
+        return "Sorry, the 'git' command is not installed or not in PATH. I need it to list files."
+    except Exception as e: # Other unexpected errors
+        logger.error(f"Unexpected error listing files with git ls-files in {current_dir_path_str}: {e}")
+        return f"An unexpected error occurred while trying to list files using Git: {str(e)}"
 
     items_list_str = ", ".join(items_in_dir) if items_in_dir else "none"
     prompt_for_file_selection = (
@@ -251,18 +282,18 @@ def add_file(full_user_query: str): # Renamed parameter
         logger.info(f"LLM suggested item name: '{selected_item_name}'")
 
         if selected_item_name.upper() == "UNCLEAR" or not selected_item_name:
-            return f"I'm not sure which file or item you mean from your request: '{full_user_query}'. Could you be more specific?" # Updated variable name
+            return f"I'm not sure which file you mean from your request: '{full_user_query}'. Could you be more specific?"
+
+        # Validate that the selected item is one of the files found by git ls-files
+        if selected_item_name not in items_in_dir:
+            logger.warning(f"LLM selected '{selected_item_name}', which is not in the git ls-files list for {current_dir_path_str}. Files found: {items_in_dir}")
+            if not items_in_dir:
+                return f"I couldn't find any files in the current directory '{current_dir_path_str}' tracked by Git. So, I cannot add '{selected_item_name}'."
+            return (f"I'm sorry, but '{selected_item_name}' is not among the files I found in the current directory "
+                    f"('{current_dir_path_str}'). Please choose from the available files: {', '.join(items_in_dir)}.")
         
-        target_path = current_dir / selected_item_name
-        
-        # Simulate "adding" the file. For this exercise, we'll just confirm.
-        # In a real scenario, this could mean `target_path.touch()`, `git add`, etc.
-        if target_path.exists():
-            action_taken_msg = f"The item '{selected_item_name}' already exists in {current_dir_path_str}. I've noted your intent to 'add' it."
-        else:
-            # Simulate creating it for the purpose of "adding"
-            # target_path.touch() # Uncomment to actually create an empty file
-            action_taken_msg = f"Okay, I'll consider '{selected_item_name}' added in {current_dir_path_str}. If it's a new file, it would be created here."
+        # If selected_item_name is in items_in_dir, it's an existing file in the current directory.
+        action_taken_msg = f"Okay, I've noted your intent to 'add' the file '{selected_item_name}' from {current_dir_path_str}."
         
         logger.info(f"Simulated action for add_file: {action_taken_msg}")
         return action_taken_msg

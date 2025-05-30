@@ -29,7 +29,10 @@ MAGIC_QUERY_PARAM_NAME = "full_user_query"
 CWD_FILE = Path.home() / ".config" / "max" / "cwd"
 ASSISTANT_NAME = "Max"
 WAKE_WORD = "max"  # Case-insensitive check
-LITELLM_MODEL = os.getenv("LITELLM_MODEL", "gemini/gemini-2.0-flash-lite")
+
+# LITELLM_MODEL = os.getenv("LITELLM_MODEL", "gemini/gemini-2.0-flash-lite")
+LITELLM_MODEL = os.getenv("LITELLM_MODEL", "gemini/gemini-2.5-flash-preview-05-20")
+
 ELEVENLABS_API_KEY = os.getenv("ELEVEN_API_KEY")
 # LiteLLM uses various keys like OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.
 # Ensure the relevant key for LITELLM_MODEL is set in the environment.
@@ -228,11 +231,11 @@ def add_file(full_user_query: str): # Renamed parameter
 
     items_list_str = ", ".join(items_in_dir) if items_in_dir else "none"
     prompt_for_file_selection = (
-        f"The user wants to add a file or item. Their original request was: '{full_user_query}'.\n" # Updated variable name
-        f"The items currently available in '{current_dir_path_str}' are: [{items_list_str}].\n"
-        f"Based on the user's request and the available items, what is the exact name of the single file or directory they most likely mean? "
-        f"If the user seems to be referring to a new file that doesn't exist, provide the name for the new file. "
-        f"Respond with only the name. If completely unsure, respond with 'UNCLEAR'."
+        f"The user wants to add a file to the context. Their original request was: '{full_user_query}'.\n"
+        f"Respond with only the full file name, which may not exactly match the user request. If completely unsure, respond with 'UNCLEAR'."
+        f"Based on the user's request and the available files (following), what is the exact name of the single file they most likely mean? "
+        # f"If the user seems to be referring to a new file that doesn't exist, provide the name for the new file. "
+        f"The files currently available in '{current_dir_path_str}' are: [{items_list_str}].\n"
     )
     
     logger.info(f"Asking LLM to select file with prompt: {prompt_for_file_selection}")

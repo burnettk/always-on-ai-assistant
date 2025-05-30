@@ -303,56 +303,26 @@ def add_file(full_user_query: str): # Renamed parameter
         return f"Sorry, I had trouble determining which file to add. Error: {str(e)}"
 
 # --- STT and Main Assistant Logic ---
-_recorder_instance: Optional[AudioToTextRecorder] = None
-_cached_tool_schemas: Optional[List[Dict[str, Any]]] = None
-_cached_function_dispatch_table: Optional[Dict[str, Callable]] = None
 
-def ensure_tools_loaded():
-    """Loads tool schemas and dispatch table if not already loaded."""
-    global _cached_tool_schemas, _cached_function_dispatch_table
-    if _cached_tool_schemas is None or _cached_function_dispatch_table is None:
-        _cached_tool_schemas = get_all_tool_schemas()
-        _cached_function_dispatch_table = {
-            tool_schema["function"]["name"]: _tool_functions[tool_schema["function"]["name"]]
-            for tool_schema in _cached_tool_schemas
-        }
-        logger.info(f"Tools loaded: {[name for name in _cached_function_dispatch_table.keys()]}")
-
-def process_transcription(transcribed_text: str):
-    """Processes transcribed text, checks for wake word, and interacts with LLM and tools."""
-    logger.info(f"Processing transcription: \"{transcribed_text}\"")
-    
-    if WAKE_WORD.lower() not in transcribed_text.lower():
-        logger.debug(f"Wake word '{WAKE_WORD}' not detected.")
-        return
-
-    # speak("Yes?") # Acknowledge wake word
-    
-    try:
-        # Attempt to extract query part after the wake word
-        query_parts = transcribed_text.lower().split(WAKE_WORD.lower(), 1)
-        user_query = query_parts[1].strip() if len(query_parts) > 1 and query_parts[1].strip() else transcribed_text
-    except Exception:
-        user_query = transcribed_text # Fallback
-    
-    logger.info(f"User query for LLM: \"{user_query}\"")
-
-    messages = [{"role": "user", "content": user_query}]
-    ensure_tools_loaded() # Make sure _cached_tool_schemas and _cached_function_dispatch_table are populated
+def handle_llm_interaction(user_query: str) -> Optional[str]:
+    """
+    Handles the core interaction with the LLM, including tool calls.
+    Returns the final textual response from the LLM, or None if no specific response.
+    """
+    logger.info(f"Core LLM interaction for query: \"{user_query}\"")
+    ensure_tools_loaded()
 
     if not _cached_tool_schemas or not _cached_function_dispatch_table:
-        logger.warning("No tools available. Proceeding with basic chat.")
-        # Basic chat response if no tools
+        logger.warning("No tools available. Attempting basic chat.")
         try:
+            messages = [{"role": "user", "content": user_query}]
             response = litellm.completion(model=LITELLM_MODEL, messages=messages)
-            content = response.choices[0].message.content
-            if content: speak(content)
-            else: speak("I'm not sure how to respond to that.")
+            return response.choices[0].message.content
         except Exception as e:
             logger.error(f"Error in basic LLM completion: {e}")
-            speak("Sorry, I had trouble processing that.")
-        return
+            return "Sorry, I had trouble processing that."
 
+    messages = [{"role": "user", "content": user_query}]
     try:
         response_obj = litellm.completion(
             model=LITELLM_MODEL,
@@ -383,7 +353,6 @@ def process_transcription(transcribed_text: str):
                     args_str = tool_call.function.arguments
                     args_dict = json.loads(args_str)
                     
-                    # Inject full user query if the function expects it via the magic parameter name
                     func_sig = inspect.signature(function_to_call)
                     if MAGIC_QUERY_PARAM_NAME in func_sig.parameters:
                         args_dict[MAGIC_QUERY_PARAM_NAME] = user_query
@@ -403,21 +372,72 @@ def process_transcription(transcribed_text: str):
                     "content": str(tool_response_content) # Ensure string
                 })
             
-            # Get final response from LLM after tool execution(s)
             logger.info("Sending tool responses to LLM for final summarization.")
             final_response_obj = litellm.completion(model=LITELLM_MODEL, messages=messages)
-            final_content = final_response_obj.choices[0].message.content
-            if final_content: speak(final_content)
-            else: speak("Done.") # Fallback if LLM gives no summary
-
+            return final_response_obj.choices[0].message.content
         else: # No tool_calls
-            logger.info("LLM did not return any tool calls. User query will be ignored as no tool was selected.")
-            # No speak() call here, effectively ignoring the query.
-            return
+            logger.info("LLM did not return any tool calls. Using direct response.")
+            return response_message.content # This could be None if LLM sends empty content
 
     except Exception as e:
         logger.error(f"Error in LLM completion or tool processing: {e}", exc_info=True)
-        speak("Sorry, I encountered an error while processing your request.")
+        return "Sorry, I encountered an error while processing your request."
+    # Fallback, should ideally be unreachable if all paths above return something.
+    return None
+
+
+_recorder_instance: Optional[AudioToTextRecorder] = None
+_cached_tool_schemas: Optional[List[Dict[str, Any]]] = None
+_cached_function_dispatch_table: Optional[Dict[str, Callable]] = None
+
+def ensure_tools_loaded():
+    """Loads tool schemas and dispatch table if not already loaded."""
+    global _cached_tool_schemas, _cached_function_dispatch_table
+    if _cached_tool_schemas is None or _cached_function_dispatch_table is None:
+        _cached_tool_schemas = get_all_tool_schemas()
+        _cached_function_dispatch_table = {
+            tool_schema["function"]["name"]: _tool_functions[tool_schema["function"]["name"]]
+            for tool_schema in _cached_tool_schemas
+        }
+        logger.info(f"Tools loaded: {[name for name in _cached_function_dispatch_table.keys()]}")
+
+def process_transcription(transcribed_text: str):
+    """Processes transcribed text, checks for wake word, and interacts with LLM and tools."""
+    logger.info(f"Processing transcription: \"{transcribed_text}\"")
+    
+    if WAKE_WORD.lower() not in transcribed_text.lower():
+        logger.debug(f"Wake word '{WAKE_WORD}' not detected.")
+        return
+    
+    try:
+        query_parts = transcribed_text.lower().split(WAKE_WORD.lower(), 1)
+        user_query = query_parts[1].strip() if len(query_parts) > 1 and query_parts[1].strip() else transcribed_text
+    except Exception:
+        user_query = transcribed_text # Fallback
+    
+    logger.info(f"User query for LLM (from transcription): \"{user_query}\"")
+
+    final_content = handle_llm_interaction(user_query)
+
+    if final_content: # This includes error messages from handle_llm_interaction
+        speak(final_content)
+    elif final_content == "": # Explicitly empty string from LLM (e.g. after tools, no summary)
+        speak("Done.")
+    # If final_content is None (e.g. LLM gave no tools, no direct content, and no error), 
+    # nothing is spoken, aligning with original behavior of ignoring if no tool selected and no direct answer.
+
+def process_text_query(user_query: str):
+    """Processes a text query, interacts with LLM/tools, and prints the response."""
+    logger.info(f"Processing text query: \"{user_query}\"")
+    
+    final_content = handle_llm_interaction(user_query)
+
+    if final_content: # This includes error messages from handle_llm_interaction
+        print(f"{ASSISTANT_NAME}: {final_content}")
+    elif final_content == "": # Explicitly empty string from LLM
+        print(f"{ASSISTANT_NAME}: Done.")
+    else: # final_content is None (no tools, no direct content, no error)
+        print(f"{ASSISTANT_NAME}: I processed your request, but there was no specific information to return.")
 
 def main_assistant_loop():
     """Initializes STT and runs the main loop for voice interaction."""
@@ -497,6 +517,11 @@ def cli_main():
         action="store_true",
         help="Use ElevenLabs for Text-to-Speech instead of the default 'say' command (macOS).",
     )
+    parser.add_argument(
+        "-q", "--query",
+        type=str,
+        help="Process a text query directly, print the response, and exit. Bypasses voice input/output.",
+    )
     args = parser.parse_args()
 
     global USE_ELEVENLABS_TTS
@@ -522,6 +547,15 @@ def cli_main():
     if args.tools:
         ensure_tools_loaded() # Ensure tools are discovered
         print(json.dumps(_cached_tool_schemas, indent=2))
+        sys.exit(0)
+    
+    if args.query:
+        # Ensure CWD file and its directory exist before processing query
+        if not CWD_FILE.parent.exists():
+            CWD_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if not CWD_FILE.exists():
+            get_current_directory() # This will create it with default if not present
+        process_text_query(args.query)
         sys.exit(0)
     else:
         # Ensure CWD file and its directory exist before starting assistant

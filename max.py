@@ -372,8 +372,9 @@ def handle_llm_interaction(user_query: str) -> Optional[str]:
                     "content": str(tool_response_content) # Ensure string
                 })
             
-            logger.info("Sending tool responses to LLM for final summarization.")
+            logger.info(f"Sending tool responses to LLM for final summarization with messages: {messages}")
             final_response_obj = litellm.completion(model=LITELLM_MODEL, messages=messages)
+            logger.info("Got response from LLM.")
             return final_response_obj.choices[0].message.content
         else: # No tool_calls
             logger.info("LLM did not return any tool calls. Using direct response.")

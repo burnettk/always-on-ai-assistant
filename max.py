@@ -541,9 +541,6 @@ def cli_main():
             logger.warning("ElevenLabs TTS enabled via flag, but ELEVEN_API_KEY is not set. ElevenLabs TTS will not be available.")
             USE_ELEVENLABS_TTS = False # Disable if no API key
     
-    # Initialize say command check early, so its availability is known before the first speak() call.
-    check_say_command()
-
     if args.tools:
         ensure_tools_loaded() # Ensure tools are discovered
         print(json.dumps(_cached_tool_schemas, indent=2))
@@ -563,6 +560,23 @@ def cli_main():
             CWD_FILE.parent.mkdir(parents=True, exist_ok=True)
         if not CWD_FILE.exists():
             get_current_directory() # This will create it with default if not present
+        
+        # Initialize TTS-related components only if not in text query mode
+        if args.elevenlabs: # This check is repeated, but ensures context for USE_ELEVENLABS_TTS
+            USE_ELEVENLABS_TTS = True # Re-affirm based on args
+            logger.info("ElevenLabs TTS explicitly enabled via --elevenlabs flag for voice mode.")
+            if ELEVENLABS_API_KEY:
+                try:
+                    elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+                    logger.info("ElevenLabs client initialized successfully for voice mode.")
+                except Exception as e:
+                    logger.error(f"Failed to initialize ElevenLabs client for voice mode: {e}. ElevenLabs TTS will not be available.")
+                    USE_ELEVENLABS_TTS = False 
+            else:
+                logger.warning("ElevenLabs TTS enabled via flag for voice mode, but ELEVEN_API_KEY is not set. ElevenLabs TTS will not be available.")
+                USE_ELEVENLABS_TTS = False
+        
+        check_say_command() # Check for 'say' command only in voice mode
             
         main_assistant_loop()
 

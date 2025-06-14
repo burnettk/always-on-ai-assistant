@@ -471,7 +471,7 @@ def process_transcription(transcribed_text: str):
     logger.info(f"Processing transcription: \"{transcribed_text}\"")
     
     if WAKE_WORD.lower() not in transcribed_text.lower():
-        logger.debug(f"Wake word '{WAKE_WORD}' not detected.")
+        logger.info(f"Wake word '{WAKE_WORD}' not detected in transcription. Ignoring.")
         return
     
     try:

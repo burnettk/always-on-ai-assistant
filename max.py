@@ -1,5 +1,7 @@
-
 import logging
+
+# USAGE: uv run max.py -q "change directory to always"
+
 # Setup basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logging.getLogger("httpx").setLevel(logging.ERROR)
@@ -27,6 +29,7 @@ import shutil
 # --- Configuration ---
 MAGIC_QUERY_PARAM_NAME = "full_user_query"
 CWD_FILE = Path.home() / ".config" / "max" / "cwd"
+ALL_DIRS_FILE = Path.home() / ".config" / "max" / "all_dirs"
 ASSISTANT_NAME = "Max"
 WAKE_WORD = "max"  # Case-insensitive check
 
@@ -180,25 +183,86 @@ def speak(text: str):
 
 # --- Tool Functions ---
 @tool_function
-def change_directory(new_path: str):
+def change_directory(full_user_query: str):
     """
-    Changes Max's current working directory.
-    Use this to navigate the file system.
-    The path should be an absolute path or relative to the user's home directory (e.g., ~/projects).
+    Identifies a target directory based on user query and a predefined list, then changes Max's current working directory.
+    This function reads a list of known directories from ~/.config/max/all_dirs.
+    It then uses an LLM to determine which directory the user most likely means based on their query.
+    Finally, it changes the current working directory to the selected path.
     """
+    if not ALL_DIRS_FILE.exists():
+        logger.error(f"Directory list file not found: {ALL_DIRS_FILE}")
+        return f"Sorry, I can't change directories right now. The configuration file ({ALL_DIRS_FILE}) listing known directories is missing."
+
     try:
-        expanded_path = Path(new_path).expanduser().resolve()
+        with open(ALL_DIRS_FILE, "r") as f:
+            possible_dirs_str = f.read().strip()
+            if not possible_dirs_str:
+                logger.warning(f"Directory list file {ALL_DIRS_FILE} is empty.")
+                return "Sorry, the list of known directories is empty. I don't have anywhere specific to go."
+            possible_dirs = [d.strip() for d in possible_dirs_str.splitlines() if d.strip()]
+            if not possible_dirs:
+                logger.warning(f"Directory list file {ALL_DIRS_FILE} contains no valid directory paths after stripping.")
+                return "Sorry, the list of known directories doesn't seem to contain any valid paths."
+    except Exception as e:
+        logger.error(f"Error reading or parsing directory list file {ALL_DIRS_FILE}: {e}")
+        return f"Sorry, I had trouble reading the list of known directories. Error: {str(e)}"
+
+    possible_dirs_list_str = "\n".join(f"- {d}" for d in possible_dirs)
+    prompt_for_dir_selection = (
+        f"The user wants to change the current directory. Their original request was: '{full_user_query}'.\n"
+        f"Based on their request and the following list of available directories, which single directory path do they most likely mean? "
+        f"Respond with only the full directory path from the list. If completely unsure, respond with 'UNCLEAR'.\n"
+        f"Available directories:\n{possible_dirs_list_str}\n"
+    )
+
+    logger.info(f"Asking LLM to select directory with prompt: {prompt_for_dir_selection}")
+
+    try:
+        messages_for_dir_selection = [{"role": "user", "content": prompt_for_dir_selection}]
+        response = litellm.completion(
+            model=LITELLM_MODEL,
+            messages=messages_for_dir_selection
+        )
+        
+        selected_dir_str = response.choices[0].message.content.strip()
+        logger.info(f"LLM suggested directory path: '{selected_dir_str}'")
+
+        if selected_dir_str.upper() == "UNCLEAR" or not selected_dir_str:
+            return f"I'm not sure which directory you mean from your request: '{full_user_query}'. Could you be more specific from the known locations?"
+
+        # Validate that the selected directory is one of the possibilities
+        # Expanduser and resolve for comparison, as LLM might return it slightly differently but meaning the same path
+        
+        # Normalize LLM output first
+        normalized_selected_dir = str(Path(selected_dir_str).expanduser().resolve())
+
+        # Normalize options from file for comparison
+        normalized_possible_dirs_map = {str(Path(d).expanduser().resolve()): d for d in possible_dirs}
+
+        if normalized_selected_dir not in normalized_possible_dirs_map:
+            logger.warning(f"LLM selected '{selected_dir_str}' (normalized to '{normalized_selected_dir}'), which is not in the predefined list of directories or doesn't resolve to a known one. Known (normalized): {list(normalized_possible_dirs_map.keys())}")
+            return (f"I'm sorry, but '{selected_dir_str}' is not one of the predefined directories I know, or it's ambiguous. "
+                    f"Please choose from the configured locations.")
+
+        # Use the original path string from the file that matches the normalized selected one
+        # This ensures we use the exact string from all_dirs for consistency if needed later
+        final_path_to_change = normalized_possible_dirs_map[normalized_selected_dir]
+        expanded_path = Path(final_path_to_change).expanduser().resolve()
+
         if not expanded_path.is_dir():
-            return f"Error: '{expanded_path}' is not a valid directory or does not exist."
+            logger.error(f"Selected directory '{expanded_path}' (from '{final_path_to_change}') is not a valid directory or does not exist.")
+            return f"Error: The selected directory '{expanded_path}' is not a valid directory or does not exist."
         
         CWD_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(CWD_FILE, "w") as f:
             f.write(str(expanded_path))
         logger.info(f"Changed CWD to: {expanded_path}")
         return f"Okay, I've changed the current directory to {expanded_path}."
+
     except Exception as e:
-        logger.error(f"Error changing directory to {new_path}: {e}")
-        return f"Sorry, I couldn't change the directory. Error: {str(e)}"
+        logger.error(f"Error during LLM call for directory selection or changing directory: {e}", exc_info=True)
+        return f"Sorry, I had trouble determining which directory to use or changing to it. Error: {str(e)}"
 
 @tool_function
 def what_is_your_name():

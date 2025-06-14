@@ -289,7 +289,6 @@ def add_file(full_user_query: str): # Renamed parameter
 
     try:
         # Use git ls-files to get a list of all tracked files recursively.
-        # This respects .gitignore.
         # The command is run in current_dir_path_str, so paths are relative to it.
         process = subprocess.run(
             ["git", "ls-files"], 
@@ -497,6 +496,7 @@ def ensure_tools_loaded():
 
 def process_transcription(transcribed_text: str):
     """Processes transcribed text, checks for wake word, and interacts with LLM and tools."""
+    global _recorder_instance
     logger.info(f"Processing transcription: \"{transcribed_text}\"")
     
     if WAKE_WORD.lower() not in transcribed_text.lower():
@@ -513,10 +513,20 @@ def process_transcription(transcribed_text: str):
 
     final_content = handle_llm_interaction(user_query)
 
-    if final_content: # This includes error messages from handle_llm_interaction
-        speak(final_content)
-    elif final_content == "": # Explicitly empty string from LLM (e.g. after tools, no summary)
-        speak("Done.")
+    if final_content is not None:
+        if _recorder_instance:
+            logger.info("Pausing recorder for speech output.")
+            _recorder_instance.pause_recording = True
+        
+        try:
+            if final_content: # This includes error messages from handle_llm_interaction
+                speak(final_content)
+            elif final_content == "": # Explicitly empty string from LLM (e.g. after tools, no summary)
+                speak("Done.")
+        finally:
+            if _recorder_instance:
+                logger.info("Resuming recorder.")
+                _recorder_instance.pause_recording = False
     # If final_content is None (e.g. LLM gave no tools, no direct content, and no error), 
     # nothing is spoken, aligning with original behavior of ignoring if no tool selected and no direct answer.
 

@@ -30,6 +30,7 @@ import shutil
 MAGIC_QUERY_PARAM_NAME = "full_user_query"
 CWD_FILE = Path.home() / ".config" / "max" / "cwd"
 ALL_DIRS_FILE = Path.home() / ".config" / "max" / "all_dirs"
+FILES_IN_CONTEXT_FILE = Path.home() / ".config" / "max" / "files_in_context"
 ASSISTANT_NAME = "Max"
 WAKE_WORD = "max"  # Case-insensitive check
 
@@ -275,10 +276,10 @@ def what_is_your_name():
 @tool_function
 def add_file(full_user_query: str): # Renamed parameter
     """
-    Identifies a Python file to add based on user query and files in the current directory (and subdirectories), then simulates adding it.
+    Identifies a Python file to add based on user query and files in the current directory (and subdirectories), then adds it to a persistent context for the current directory.
     This function recursively lists all Python (.py) files in the current directory that are tracked by Git.
-    Then, it uses an LLM to determine which specific file the user wants to add based on their query and the list of available files.
-    Finally, it confirms the action of adding the selected file. This can be used to create new files or acknowledge existing ones in context of "adding".
+    It uses an LLM to determine which file the user wants to add.
+    The selected file's path is then stored in ~/.config/max/files_in_context, associated with the current directory.
     """
     current_dir_path_str = get_current_directory()
     current_dir = Path(current_dir_path_str)
@@ -352,11 +353,43 @@ def add_file(full_user_query: str): # Renamed parameter
             return (f"I'm sorry, but '{selected_item_name}' is not among the Python files I found in the current directory "
                     f"('{current_dir_path_str}'). Please choose from the available files: {', '.join(python_files)}.")
         
-        # If selected_item_name is in python_files, it's an existing file.
-        action_taken_msg = f"Okay, I've noted your intent to 'add' the file '{selected_item_name}' from {current_dir_path_str}."
-        
-        logger.info(f"Simulated action for add_file: {action_taken_msg}")
-        return action_taken_msg
+        # If selected_item_name is in python_files, it's an existing file. Add it to context.
+        try:
+            # Ensure parent directory for context file exists
+            FILES_IN_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+            # Load existing context
+            context_data = {}
+            if FILES_IN_CONTEXT_FILE.exists() and FILES_IN_CONTEXT_FILE.stat().st_size > 0:
+                with open(FILES_IN_CONTEXT_FILE, "r") as f:
+                    context_data = json.load(f)
+            
+            # Get or initialize the list for the current directory
+            files_for_current_dir = context_data.get(current_dir_path_str, [])
+
+            # Add the file if it's not already in the list
+            if selected_item_name not in files_for_current_dir:
+                files_for_current_dir.append(selected_item_name)
+                context_data[current_dir_path_str] = files_for_current_dir
+
+                # Write the updated context back to the file
+                with open(FILES_IN_CONTEXT_FILE, "w") as f:
+                    json.dump(context_data, f, indent=2)
+                
+                action_taken_msg = f"Okay, I've added the file '{selected_item_name}' to the context for the current directory."
+                logger.info(f"Added '{selected_item_name}' to context for '{current_dir_path_str}' in {FILES_IN_CONTEXT_FILE}")
+            else:
+                action_taken_msg = f"The file '{selected_item_name}' is already in the context for this directory."
+                logger.info(f"File '{selected_item_name}' already in context for '{current_dir_path_str}'. No change made.")
+
+            return action_taken_msg
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decoding JSON from {FILES_IN_CONTEXT_FILE}: {e}")
+            return f"Sorry, I couldn't update the context file because it seems to be corrupted. Please check the file: {FILES_IN_CONTEXT_FILE}"
+        except Exception as e:
+            logger.error(f"Error updating context file {FILES_IN_CONTEXT_FILE}: {e}", exc_info=True)
+            return f"Sorry, I encountered an unexpected error while trying to update the file context. Error: {str(e)}"
 
     except Exception as e:
         logger.error(f"Error during LLM call for file selection or processing: {e}")

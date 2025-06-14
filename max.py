@@ -275,8 +275,8 @@ def what_is_your_name():
 @tool_function
 def add_file(full_user_query: str): # Renamed parameter
     """
-    Identifies a file to add based on user query and files in the current directory, then simulates adding it.
-    This function lists files in the current directory.
+    Identifies a Python file to add based on user query and files in the current directory (and subdirectories), then simulates adding it.
+    This function recursively lists all Python (.py) files in the current directory that are tracked by Git.
     Then, it uses an LLM to determine which specific file the user wants to add based on their query and the list of available files.
     Finally, it confirms the action of adding the selected file. This can be used to create new files or acknowledge existing ones in context of "adding".
     """
@@ -287,8 +287,8 @@ def add_file(full_user_query: str): # Renamed parameter
         return f"Error: The current directory '{current_dir_path_str}' is not valid."
 
     try:
-        # Use git ls-files to get a list of tracked files in the current directory.
-        # This respects .gitignore and only lists files (not directories).
+        # Use git ls-files to get a list of all tracked files recursively.
+        # This respects .gitignore.
         # The command is run in current_dir_path_str, so paths are relative to it.
         process = subprocess.run(
             ["git", "ls-files"], 
@@ -298,17 +298,13 @@ def add_file(full_user_query: str): # Renamed parameter
             check=True  # Will raise CalledProcessError if git command fails
         )
         
-        relative_file_paths = process.stdout.splitlines()
+        all_tracked_files = process.stdout.splitlines()
         
-        items_in_dir = []
-        for rel_path_str in relative_file_paths:
-            # A path like "file.txt" has parent ".", "subdir/file.txt" has parent "subdir"
-            # We only want files directly in the current directory.
-            path_obj = Path(rel_path_str)
-            if path_obj.parent == Path('.'): 
-                # Ensure it's a file, not a submodule entry or other non-file tracked item
-                if (current_dir / path_obj).is_file():
-                    items_in_dir.append(path_obj.name)
+        # Filter for Python files and ensure they are actually files.
+        python_files = [
+            rel_path for rel_path in all_tracked_files
+            if rel_path.endswith('.py') and (current_dir / rel_path).is_file()
+        ]
         
     except subprocess.CalledProcessError as e:
         # This typically means current_dir is not a git repo or git command failed.
@@ -324,13 +320,15 @@ def add_file(full_user_query: str): # Renamed parameter
         logger.error(f"Unexpected error listing files with git ls-files in {current_dir_path_str}: {e}")
         return f"An unexpected error occurred while trying to list files using Git: {str(e)}"
 
-    items_list_str = ", ".join(items_in_dir) if items_in_dir else "none"
+    if not python_files:
+        return f"I couldn't find any Python (.py) files tracked by Git in '{current_dir_path_str}' or its subdirectories."
+
+    items_list_str = "\n".join(f"- {f}" for f in python_files)
     prompt_for_file_selection = (
-        f"The user wants to add a file to the context. Their original request was: '{full_user_query}'.\n"
-        f"Respond with only the full file name, which may not exactly match the user request. If completely unsure, respond with 'UNCLEAR'."
-        f"Based on the user's request and the available files (following), what is the exact name of the single file they most likely mean? "
-        # f"If the user seems to be referring to a new file that doesn't exist, provide the name for the new file. "
-        f"The files currently available in '{current_dir_path_str}' are: [{items_list_str}].\n"
+        f"The user wants to add a Python file to the context. Their original request was: '{full_user_query}'.\n"
+        f"Based on the user's request and the following list of available Python files, which single file path do they most likely mean? "
+        f"Respond with only the full file path from the list. If completely unsure, respond with 'UNCLEAR'.\n"
+        f"Available Python files in '{current_dir_path_str}':\n{items_list_str}\n"
     )
     
     logger.info(f"Asking LLM to select file with prompt: {prompt_for_file_selection}")
@@ -348,15 +346,13 @@ def add_file(full_user_query: str): # Renamed parameter
         if selected_item_name.upper() == "UNCLEAR" or not selected_item_name:
             return f"I'm not sure which file you mean from your request: '{full_user_query}'. Could you be more specific?"
 
-        # Validate that the selected item is one of the files found by git ls-files
-        if selected_item_name not in items_in_dir:
-            logger.warning(f"LLM selected '{selected_item_name}', which is not in the git ls-files list for {current_dir_path_str}. Files found: {items_in_dir}")
-            if not items_in_dir:
-                return f"I couldn't find any files in the current directory '{current_dir_path_str}' tracked by Git. So, I cannot add '{selected_item_name}'."
-            return (f"I'm sorry, but '{selected_item_name}' is not among the files I found in the current directory "
-                    f"('{current_dir_path_str}'). Please choose from the available files: {', '.join(items_in_dir)}.")
+        # Validate that the selected item is one of the python files found
+        if selected_item_name not in python_files:
+            logger.warning(f"LLM selected '{selected_item_name}', which is not in the list of Python files for {current_dir_path_str}. Files found: {python_files}")
+            return (f"I'm sorry, but '{selected_item_name}' is not among the Python files I found in the current directory "
+                    f"('{current_dir_path_str}'). Please choose from the available files: {', '.join(python_files)}.")
         
-        # If selected_item_name is in items_in_dir, it's an existing file in the current directory.
+        # If selected_item_name is in python_files, it's an existing file.
         action_taken_msg = f"Okay, I've noted your intent to 'add' the file '{selected_item_name}' from {current_dir_path_str}."
         
         logger.info(f"Simulated action for add_file: {action_taken_msg}")

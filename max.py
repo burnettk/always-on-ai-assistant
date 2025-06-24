@@ -25,12 +25,14 @@ from elevenlabs import play, Voice, VoiceSettings
 from elevenlabs.client import ElevenLabs
 import subprocess
 import shutil
+import re
 
 # --- Configuration ---
 MAGIC_QUERY_PARAM_NAME = "full_user_query"
 CWD_FILE = Path.home() / ".config" / "max" / "cwd"
 ALL_DIRS_FILE = Path.home() / ".config" / "max" / "all_dirs"
 FILES_IN_CONTEXT_FILE = Path.home() / ".config" / "max" / "files_in_context"
+CODING_MODEL_ALIAS_FILE = Path.home() / ".config" / "max" / "coding_model_alias"
 ASSISTANT_NAME = "Max"
 WAKE_WORD = "max"  # Case-insensitive check
 
@@ -393,6 +395,97 @@ def add_file(full_user_query: str): # Renamed parameter
     except Exception as e:
         logger.error(f"Error during LLM call for file selection or processing: {e}")
         return f"Sorry, I had trouble determining which file to add. Error: {str(e)}"
+
+@tool_function
+def set_coding_model(full_user_query: str):
+    """
+    Sets the coding model alias by selecting from a list of available models provided by 'ca -l'.
+    This function shells out to 'ca -l' to get a list of models and their aliases.
+    It then uses an LLM to determine which model alias the user intends to set based on their query.
+    The selected alias is then saved to ~/.config/max/coding_model_alias for other tools to use.
+    """
+    try:
+        process = subprocess.run(
+            ["ca", "-l"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        ca_output = process.stdout
+    except FileNotFoundError:
+        logger.error("'ca' command not found. It's required for setting the coding model.")
+        return "Sorry, the 'ca' command (from config-aider) is not installed or not in your PATH. I need it to list and set coding models."
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error running 'ca -l': {e.stderr}")
+        return f"Sorry, I couldn't get the list of models. The 'ca -l' command failed: {e.stderr}"
+
+    # Parse the output to build a map of available model names/aliases to the alias to be stored.
+    name_to_alias_map = {}
+    alias_regex = re.compile(r'\(aliases: ([^\)]+)\)')
+
+    for line in ca_output.strip().splitlines():
+        if not line.strip() or ':' not in line:
+            continue
+
+        model_name = line.split(':')[0].strip()
+        match = alias_regex.search(line)
+
+        if match:
+            aliases_str = match.group(1)
+            aliases = [a.strip() for a in aliases_str.split(',')]
+            if aliases:
+                primary_alias = aliases[0] # Use the first alias as the one to store
+                name_to_alias_map[model_name] = primary_alias
+                for alias in aliases:
+                    name_to_alias_map[alias] = alias
+
+    if not name_to_alias_map:
+        return "I ran 'ca -l' but couldn't find any models with defined aliases. Please configure aliases in config-aider first."
+
+    available_choices = sorted(list(name_to_alias_map.keys()))
+    choices_list_str = "\n".join(f"- {choice}" for choice in available_choices)
+
+    prompt_for_selection = (
+        f"The user wants to set the coding model. Their original request was: '{full_user_query}'.\n"
+        f"Based on their request and the following list of available models and aliases, which single option do they most likely mean? "
+        f"Respond with only the name or alias from the list. If completely unsure, respond with 'UNCLEAR'.\n"
+        f"Available options:\n{choices_list_str}\n"
+    )
+
+    logger.info(f"Asking LLM to select coding model with prompt: {prompt_for_selection}")
+
+    try:
+        messages_for_selection = [{"role": "user", "content": prompt_for_selection}]
+        response = litellm.completion(
+            model=LITELLM_MODEL,
+            messages=messages_for_selection
+        )
+        
+        selected_choice = response.choices[0].message.content.strip()
+        logger.info(f"LLM suggested coding model/alias: '{selected_choice}'")
+
+        if selected_choice.upper() == "UNCLEAR" or not selected_choice:
+            return f"I'm not sure which coding model you mean from your request: '{full_user_query}'. Could you be more specific?"
+
+        if selected_choice not in name_to_alias_map:
+            logger.warning(f"LLM selected '{selected_choice}', which is not in the list of available options.")
+            return f"I'm sorry, but '{selected_choice}' is not a valid model or alias I can set."
+
+        alias_to_save = name_to_alias_map[selected_choice]
+
+        try:
+            CODING_MODEL_ALIAS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(CODING_MODEL_ALIAS_FILE, "w") as f:
+                f.write(alias_to_save)
+            logger.info(f"Set coding model alias to '{alias_to_save}' in {CODING_MODEL_ALIAS_FILE}")
+            return f"Okay, I've set the coding model alias to {alias_to_save}."
+        except Exception as e:
+            logger.error(f"Error writing to coding model alias file {CODING_MODEL_ALIAS_FILE}: {e}", exc_info=True)
+            return f"Sorry, I encountered an error while trying to save the coding model alias. Error: {str(e)}"
+
+    except Exception as e:
+        logger.error(f"Error during LLM call for coding model selection: {e}", exc_info=True)
+        return f"Sorry, I had trouble determining which coding model to set. Error: {str(e)}"
 
 # --- STT and Main Assistant Logic ---
 

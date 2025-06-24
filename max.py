@@ -404,17 +404,30 @@ def handle_llm_interaction(user_query: str) -> Optional[str]:
     logger.info(f"Core LLM interaction for query: \"{user_query}\"")
     ensure_tools_loaded()
 
+    system_prompt = (
+        "You are a voice assistant named Max. Your responses will be spoken out loud, "
+        "so be concise and use natural, conversational language. "
+        "Avoid complex punctuation like markdown, bullet points, or long lists that are hard to read aloud. "
+        "When a tool has been used successfully, provide a brief confirmation."
+    )
+
     if not _cached_tool_schemas or not _cached_function_dispatch_table:
         logger.warning("No tools available. Attempting basic chat.")
         try:
-            messages = [{"role": "user", "content": user_query}]
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query}
+            ]
             response = litellm.completion(model=LITELLM_MODEL, messages=messages)
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"Error in basic LLM completion: {e}")
             return "Sorry, I had trouble processing that."
 
-    messages = [{"role": "user", "content": user_query}]
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_query}
+    ]
     try:
         response_obj = litellm.completion(
             model=LITELLM_MODEL,

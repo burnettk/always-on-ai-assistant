@@ -487,6 +487,86 @@ def set_coding_model(full_user_query: str):
         logger.error(f"Error during LLM call for coding model selection: {e}", exc_info=True)
         return f"Sorry, I had trouble determining which coding model to set. Error: {str(e)}"
 
+@tool_function
+def update_code(full_user_query: str):
+    """
+    Updates code in the files currently in context using the configured coding model.
+    This function constructs and executes a command like: 'ca [model_alias] [file1] [file2] ... -m "user query"'.
+    It requires a coding model alias to be set and at least one file to be in the context for the current directory.
+    """
+    # 1. Get coding model alias
+    try:
+        if not CODING_MODEL_ALIAS_FILE.exists() or CODING_MODEL_ALIAS_FILE.stat().st_size == 0:
+            return "The coding model alias is not set. Please set it first using the 'set coding model' command."
+        with open(CODING_MODEL_ALIAS_FILE, "r") as f:
+            coding_model_alias = f.read().strip()
+    except Exception as e:
+        logger.error(f"Error reading coding model alias file {CODING_MODEL_ALIAS_FILE}: {e}")
+        return f"Sorry, I had trouble reading the coding model alias. Error: {str(e)}"
+
+    # 2. Get files in context
+    current_dir_path_str = get_current_directory()
+    files_in_context = []
+    try:
+        if FILES_IN_CONTEXT_FILE.exists() and FILES_IN_CONTEXT_FILE.stat().st_size > 0:
+            with open(FILES_IN_CONTEXT_FILE, "r") as f:
+                context_data = json.load(f)
+            files_in_context = context_data.get(current_dir_path_str, [])
+        
+        if not files_in_context:
+            return "There are no files in the context for the current directory. Please add files first using the 'add file' command."
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON from {FILES_IN_CONTEXT_FILE}: {e}")
+        return f"Sorry, I couldn't read the context file because it seems to be corrupted. Please check the file: {FILES_IN_CONTEXT_FILE}"
+    except Exception as e:
+        logger.error(f"Error reading context file {FILES_IN_CONTEXT_FILE}: {e}")
+        return f"Sorry, I encountered an unexpected error while reading the file context. Error: {str(e)}"
+
+    # 3. Construct and execute the command
+    command = ["ca", coding_model_alias] + files_in_context + ["-m", full_user_query]
+    
+    logger.info(f"Executing code update command: {' '.join(command)}")
+
+    try:
+        # We run this from the current directory of the assistant
+        process = subprocess.run(
+            command,
+            cwd=current_dir_path_str,
+            capture_output=True,
+            text=True,
+            # Not using check=True, as 'ca' might return non-zero exit codes for various reasons.
+            # We'll return the output to the user regardless.
+        )
+        
+        stdout = process.stdout.strip()
+        stderr = process.stderr.strip()
+        
+        logger.info(f"'ca' command stdout: {stdout}")
+        if stderr:
+            logger.warning(f"'ca' command stderr: {stderr}")
+
+        if stderr and not stdout:
+            # If there's only stderr, it's likely a pure error message.
+            return f"The code update command failed with an error: {stderr}"
+        
+        # Combine stdout and stderr for the response, as 'ca' might print progress to stderr.
+        response = stdout
+        if stderr:
+            response += f"\n\nNotes from the process:\n{stderr}"
+
+        if not response:
+            return "The code update command ran but produced no output."
+
+        return response
+
+    except FileNotFoundError:
+        logger.error("'ca' command not found. It's required for updating code.")
+        return "Sorry, the 'ca' command (from config-aider) is not installed or not in your PATH. I need it to update code."
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while running 'ca': {e}", exc_info=True)
+        return f"An unexpected error occurred while trying to update code: {str(e)}"
+
 # --- STT and Main Assistant Logic ---
 
 def handle_llm_interaction(user_query: str) -> Optional[str]:

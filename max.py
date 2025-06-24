@@ -268,14 +268,6 @@ def change_directory(full_user_query: str):
         return f"Sorry, I had trouble determining which directory to use or changing to it. Error: {str(e)}"
 
 @tool_function
-def what_is_your_name():
-    """
-    Responds with the assistant's name.
-    Call this function if the user asks for your name.
-    """
-    return f"My name is {ASSISTANT_NAME}."
-
-@tool_function
 def add_file(full_user_query: str): # Renamed parameter
     """
     Identifies a Python file to add based on user query and files in the current directory (and subdirectories), then adds it to a persistent context for the current directory.
@@ -491,8 +483,6 @@ def set_coding_model(full_user_query: str):
 def update_code(full_user_query: str):
     """
     Updates code in the files currently in context using the configured coding model.
-    This function constructs and executes a command like: 'ca [model_alias] [file1] [file2] ... -m "user query"'.
-    It requires a coding model alias to be set and at least one file to be in the context for the current directory.
     """
     # 1. Get coding model alias
     try:

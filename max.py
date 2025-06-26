@@ -1,60 +1,108 @@
+"""
+Max: A voice-activated or text-based AI assistant for developers.
+
+USAGE: uv run max.py -q "change directory to always"
+
+Max can perform actions on your local machine through a tool-based architecture.
+It is designed to be invoked with a wake word ("Max") or via a direct text query.
+
+Features:
+- Voice activation using RealtimeSTT.
+- Text-to-speech output using ElevenLabs or macOS 'say' command.
+- Extensible tool system for adding new capabilities.
+- LLM-powered tool selection and natural language understanding.
+- Manages its own state (e.g., current working directory) for context-aware actions.
+
+Usage:
+- Voice mode: `uv run max.py`
+- Text query: `uv run max.py -q "your command"`
+- See tools:  `uv run max.py --tools`
+"""
 import logging
-
-# USAGE: uv run max.py -q "change directory to always"
-
-# Setup basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logging.getLogger("httpx").setLevel(logging.ERROR)
-logging.getLogger("LiteLLM").setLevel(logging.ERROR)
-logger = logging.getLogger(__name__)
-
-import litellm
-# Reduce litellm verbosity
-litellm.suppress_debug_info = True
-
 import json
 import os
 import inspect
 import sys
 import argparse
-from pydantic import BaseModel, create_model, Field
-from typing import Optional, List, Dict, Any, Callable
-from pathlib import Path
-from RealtimeSTT import AudioToTextRecorder
-from elevenlabs import play, Voice, VoiceSettings
-from elevenlabs.client import ElevenLabs
 import subprocess
 import shutil
 import re
+from pydantic import BaseModel, create_model
+from typing import Optional, List, Dict, Any, Callable
+from pathlib import Path
+
+# Third-party imports
+import litellm
+from RealtimeSTT import AudioToTextRecorder
+from elevenlabs import play, Voice, VoiceSettings
+from elevenlabs.client import ElevenLabs
 
 # --- Configuration ---
 MAGIC_QUERY_PARAM_NAME = "full_user_query"
-CWD_FILE = Path.home() / ".config" / "max" / "cwd"
-ALL_DIRS_FILE = Path.home() / ".config" / "max" / "all_dirs"
-FILES_IN_CONTEXT_FILE = Path.home() / ".config" / "max" / "files_in_context"
-CODING_MODEL_ALIAS_FILE = Path.home() / ".config" / "max" / "coding_model_alias"
+CONFIG_DIR = Path.home() / ".config" / "max"
+CWD_FILE = CONFIG_DIR / "cwd"
+ALL_DIRS_FILE = CONFIG_DIR / "all_dirs"
+FILES_IN_CONTEXT_FILE = CONFIG_DIR / "files_in_context"
+CODING_MODEL_ALIAS_FILE = CONFIG_DIR / "coding_model_alias"
 ASSISTANT_NAME = "Max"
-WAKE_WORD = "max"  # Case-insensitive check
+WAKE_WORD = "max"
 
-# LITELLM_MODEL = os.getenv("LITELLM_MODEL", "gemini/gemini-2.0-flash-lite")
 LITELLM_MODEL = os.getenv("LITELLM_MODEL", "gemini/gemini-2.5-flash-preview-05-20")
-
 ELEVENLABS_API_KEY = os.getenv("ELEVEN_API_KEY")
-# LiteLLM uses various keys like OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.
-# Ensure the relevant key for LITELLM_MODEL is set in the environment.
 
-USE_ELEVENLABS_TTS = False  # Global flag, set by CLI
-SAY_COMMAND_AVAILABLE = None # To cache whether 'say' command exists
+# --- Global State ---
+logger = logging.getLogger(__name__)
+_tool_functions: Dict[str, Callable] = {}
+_recorder_instance: Optional[AudioToTextRecorder] = None
+_cached_tool_schemas: Optional[List[Dict[str, Any]]] = None
+_cached_function_dispatch_table: Optional[Dict[str, Callable]] = None
+elevenlabs_client: Optional[ElevenLabs] = None
+USE_ELEVENLABS_TTS = False
+SAY_COMMAND_AVAILABLE: Optional[bool] = None
 
+# --- Setup and Initialization ---
 
+def _setup_logging():
+    """Sets up the initial logging configuration."""
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.getLogger("httpx").setLevel(logging.ERROR)
+    logging.getLogger("LiteLLM").setLevel(logging.ERROR)
+    litellm.suppress_debug_info = True
 
+def _create_config_dir_if_not_exists():
+    """Ensures the configuration directory and the CWD file exist."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        if not CWD_FILE.exists():
+            # Call get_current_directory to create it with the default value
+            get_current_directory()
+    except Exception as e:
+        logger.error(f"Fatal: Could not create config directory {CONFIG_DIR}: {e}", exc_info=True)
+        sys.exit(1)
 
-# --- ElevenLabs Client ---
-elevenlabs_client = None
-# Initialization will be handled in cli_main based on --elevenlabs flag
+def _initialize_tts(use_elevenlabs: bool):
+    """Initializes the TTS system based on user flags for voice mode."""
+    global USE_ELEVENLABS_TTS, elevenlabs_client
+    if use_elevenlabs:
+        logger.info("ElevenLabs TTS explicitly enabled.")
+        if ELEVENLABS_API_KEY:
+            try:
+                elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+                logger.info("ElevenLabs client initialized successfully.")
+                USE_ELEVENLABS_TTS = True
+            except Exception as e:
+                logger.error(f"Failed to initialize ElevenLabs client: {e}. Disabling ElevenLabs TTS.")
+                USE_ELEVENLABS_TTS = False
+        else:
+            logger.warning("ElevenLabs TTS flag is set, but ELEVEN_API_KEY is not. Disabling ElevenLabs TTS.")
+            USE_ELEVENLABS_TTS = False
+    else:
+        USE_ELEVENLABS_TTS = False
+    
+    # Always check for the fallback 'say' command.
+    check_say_command()
 
 # --- Tool Definition and Schema Generation ---
-_tool_functions: Dict[str, Callable] = {}
 
 def tool_function(func: Callable) -> Callable:
     """Decorator to mark functions as tools and register them."""
@@ -65,7 +113,6 @@ def tool_function(func: Callable) -> Callable:
 
 def get_function_schema(func: Callable) -> Dict[str, Any]:
     """Generates a JSON schema for a function's parameters using Pydantic."""
-    
     func_name = func.__name__
     description = inspect.getdoc(func) or f"Executes the {func_name} action."
     
@@ -73,7 +120,7 @@ def get_function_schema(func: Callable) -> Dict[str, Any]:
     param_fields = {}
     for name, param in sig.parameters.items():
         if name == MAGIC_QUERY_PARAM_NAME:
-            continue # Skip magic parameter for schema generation
+            continue
 
         annotation = param.annotation
         if annotation == inspect.Parameter.empty:
@@ -82,16 +129,10 @@ def get_function_schema(func: Callable) -> Dict[str, Any]:
         default_value = param.default if param.default != inspect.Parameter.empty else ...
         param_fields[name] = (annotation, default_value)
 
-    # create_model handles empty param_fields correctly, 
-    # resulting in a schema with 'type': 'object' and 'properties': {}
-    parameters_model = create_model(
-        f"{func_name}Params", 
-        **param_fields,
-        __base__=BaseModel
-    )
+    parameters_model = create_model(f"{func_name}Params", **param_fields, __base__=BaseModel)
     parameters_json_schema = parameters_model.model_json_schema()
     
-    schema = {
+    return {
         "type": "function",
         "function": {
             "name": func_name,
@@ -99,10 +140,9 @@ def get_function_schema(func: Callable) -> Dict[str, Any]:
             "parameters": parameters_json_schema
         }
     }
-    return schema
 
 def get_all_tool_schemas() -> List[Dict[str, Any]]:
-    """Gets schemas for all registered tool functions by checking the _tool_functions registry."""
+    """Gets schemas for all registered tool functions."""
     schemas = []
     for name, func in _tool_functions.items():
         try:
@@ -112,19 +152,17 @@ def get_all_tool_schemas() -> List[Dict[str, Any]]:
     return schemas
 
 # --- Helper Functions ---
+
 def get_current_directory() -> str:
-    """Reads the current working directory from the CWD_FILE."""
+    """Reads the current working directory from the CWD_FILE, creating it if necessary."""
     try:
         if not CWD_FILE.exists():
             default_cwd = str(Path.home())
             CWD_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(CWD_FILE, "w") as f:
-                f.write(default_cwd)
+            CWD_FILE.write_text(default_cwd)
             logger.info(f"CWD file not found. Created and set to default: {default_cwd}")
             return default_cwd
-        
-        with open(CWD_FILE, "r") as f:
-            return f.read().strip()
+        return CWD_FILE.read_text().strip()
     except Exception as e:
         logger.error(f"Error accessing CWD file {CWD_FILE}: {e}. Falling back to home directory.")
         return str(Path.home())
@@ -132,7 +170,7 @@ def get_current_directory() -> str:
 def check_say_command():
     """Checks if the 'say' command is available and caches the result."""
     global SAY_COMMAND_AVAILABLE
-    if SAY_COMMAND_AVAILABLE is None: # Check only once
+    if SAY_COMMAND_AVAILABLE is None:
         SAY_COMMAND_AVAILABLE = shutil.which("say") is not None
         if SAY_COMMAND_AVAILABLE:
             logger.info("TTS: 'say' command is available.")
@@ -140,419 +178,254 @@ def check_say_command():
             logger.warning("TTS: 'say' command not found. Console print will be used if ElevenLabs is not active or fails.")
 
 def speak(text: str):
-    """Speaks the given text using ElevenLabs (if enabled and available) or 'say' command, otherwise prints to console."""
-    global USE_ELEVENLABS_TTS, SAY_COMMAND_AVAILABLE
-
-    if USE_ELEVENLABS_TTS:
-        if elevenlabs_client:
-            try:
-                logger.info(f"Attempting to speak with ElevenLabs: \"{text}\"")
-                voice_id = os.getenv("ELEVENLABS_VOICE_ID", 'pNInz6obpgDQGcFmaJgB') # Default example voice
-                audio = elevenlabs_client.generate(
-                    text=text,
-                    voice=Voice(
-                        voice_id=voice_id,
-                        settings=VoiceSettings(stability=0.7, similarity_boost=0.6, style=0.0, use_speaker_boost=True)
-                    ),
-                    model=os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2") # Fast model
-                )
-                play(audio)
-                logger.info(f"Spoke with ElevenLabs: \"{text}\"")
-                return
-            except Exception as e:
-                logger.error(f"ElevenLabs TTS failed: {e}. Falling back.")
-        else:
-            logger.warning("ElevenLabs TTS requested via --elevenlabs, but client not available (e.g., API key missing). Falling back.")
-
-    # Fallback to 'say' command or print
-    # SAY_COMMAND_AVAILABLE should have been initialized by check_say_command() in cli_main.
-    # If it's somehow None here, check_say_command() inside would log a warning if 'say' is not found.
-    if SAY_COMMAND_AVAILABLE is None:
-        check_say_command() # Defensive check, normally already called.
-
+    """Speaks text using ElevenLabs or a fallback 'say' command, otherwise prints to console."""
+    if USE_ELEVENLABS_TTS and elevenlabs_client:
+        try:
+            logger.info(f'Attempting to speak with ElevenLabs: "{text}"')
+            voice_id = os.getenv("ELEVENLABS_VOICE_ID", 'pNInz6obpgDQGcFmaJgB')
+            audio = elevenlabs_client.generate(
+                text=text,
+                voice=Voice(
+                    voice_id=voice_id,
+                    settings=VoiceSettings(stability=0.7, similarity_boost=0.6, style=0.0, use_speaker_boost=True)
+                ),
+                model=os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2")
+            )
+            play(audio)
+            logger.info(f'Spoke with ElevenLabs: "{text}"')
+            return
+        except Exception as e:
+            logger.error(f"ElevenLabs TTS failed: {e}. Falling back.")
+    
     if SAY_COMMAND_AVAILABLE:
         try:
-            # Using capture_output to prevent 'say' from writing to stdout/stderr unless it's an error we want to log.
-            # However, 'say' typically doesn't output on success.
             subprocess.run(["say", text], check=True, capture_output=True, text=True)
-            logger.info(f"TTS (say): \"{text}\"")
+            logger.info(f'TTS (say): "{text}"')
             return
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             logger.error(f"TTS with 'say' command failed: {e}. Falling back to print.")
     
-    # Final fallback: print to console
     print(f"{ASSISTANT_NAME}: {text}")
-    logger.info(f"TTS (console print): \"{text}\"")
+    logger.info(f'TTS (console print): "{text}"')
+
+def _select_item_with_llm(user_query: str, item_type_name: str, items: List[str], action_description: str) -> str:
+    """Uses an LLM to select a single item from a list based on a user query."""
+    items_list_str = "\n".join(f"- {item}" for item in items)
+    prompt = (
+        f"The user wants to {action_description}. Their original request was: '{user_query}'.\n"
+        f"Based on their request and the following list of available {item_type_name}s, which single option do they most likely mean? "
+        f"Respond with only the full item from the list. If completely unsure, respond with 'UNCLEAR'.\n"
+        f"Available {item_type_name}s:\n{items_list_str}\n"
+    )
+
+    logger.info(f"Asking LLM to select {item_type_name}...")
+    try:
+        messages = [{"role": "user", "content": prompt}]
+        response = litellm.completion(model=LITELLM_MODEL, messages=messages)
+        selected_item = response.choices[0].message.content.strip()
+        logger.info(f"LLM suggested {item_type_name}: '{selected_item}'")
+        
+        if not selected_item or selected_item.upper() == "UNCLEAR":
+            return "UNCLEAR"
+        return selected_item
+    except Exception as e:
+        logger.error(f"Error during LLM call for {item_type_name} selection: {e}", exc_info=True)
+        return f"LLM_ERROR: {str(e)}"
 
 # --- Tool Functions ---
+
 @tool_function
 def change_directory(full_user_query: str):
     """
     Identifies a target directory based on user query and a predefined list, then changes Max's current working directory.
-    This function reads a list of known directories from ~/.config/max/all_dirs.
-    It then uses an LLM to determine which directory the user most likely means based on their query.
-    Finally, it changes the current working directory to the selected path.
     """
     if not ALL_DIRS_FILE.exists():
-        logger.error(f"Directory list file not found: {ALL_DIRS_FILE}")
-        return f"Sorry, I can't change directories right now. The configuration file ({ALL_DIRS_FILE}) listing known directories is missing."
+        return f"Sorry, the configuration file ({ALL_DIRS_FILE}) listing known directories is missing."
 
     try:
-        with open(ALL_DIRS_FILE, "r") as f:
-            possible_dirs_str = f.read().strip()
-            if not possible_dirs_str:
-                logger.warning(f"Directory list file {ALL_DIRS_FILE} is empty.")
-                return "Sorry, the list of known directories is empty. I don't have anywhere specific to go."
-            possible_dirs = [d.strip() for d in possible_dirs_str.splitlines() if d.strip()]
-            if not possible_dirs:
-                logger.warning(f"Directory list file {ALL_DIRS_FILE} contains no valid directory paths after stripping.")
-                return "Sorry, the list of known directories doesn't seem to contain any valid paths."
+        possible_dirs = [d.strip() for d in ALL_DIRS_FILE.read_text().splitlines() if d.strip()]
+        if not possible_dirs:
+            return "Sorry, the list of known directories is empty. I don't have anywhere specific to go."
     except Exception as e:
-        logger.error(f"Error reading or parsing directory list file {ALL_DIRS_FILE}: {e}")
         return f"Sorry, I had trouble reading the list of known directories. Error: {str(e)}"
 
-    possible_dirs_list_str = "\n".join(f"- {d}" for d in possible_dirs)
-    prompt_for_dir_selection = (
-        f"The user wants to change the current directory. Their original request was: '{full_user_query}'.\n"
-        f"Based on their request and the following list of available directories, which single directory path do they most likely mean? "
-        f"Respond with only the full directory path from the list. If completely unsure, respond with 'UNCLEAR'.\n"
-        f"Available directories:\n{possible_dirs_list_str}\n"
-    )
+    selected_dir_str = _select_item_with_llm(full_user_query, "directory", possible_dirs, "change the current directory")
+    
+    if selected_dir_str == "UNCLEAR":
+        return f"I'm not sure which directory you mean from your request: '{full_user_query}'. Could you be more specific?"
+    if selected_dir_str.startswith("LLM_ERROR"):
+        return f"Sorry, I had trouble determining which directory to use. Error: {selected_dir_str}"
 
-    logger.info(f"Asking LLM to select directory with prompt: {prompt_for_dir_selection}")
+    normalized_selected_dir = str(Path(selected_dir_str).expanduser().resolve())
+    normalized_possible_dirs_map = {str(Path(d).expanduser().resolve()): d for d in possible_dirs}
 
+    if normalized_selected_dir not in normalized_possible_dirs_map:
+        logger.warning(f"LLM selected '{selected_dir_str}', which is not in the predefined list.")
+        return f"I'm sorry, but '{selected_dir_str}' is not one of the predefined directories I know."
+
+    final_path_to_change = normalized_possible_dirs_map[normalized_selected_dir]
+    expanded_path = Path(final_path_to_change).expanduser().resolve()
+
+    if not expanded_path.is_dir():
+        return f"Error: The selected directory '{expanded_path}' is not a valid directory."
+    
     try:
-        messages_for_dir_selection = [{"role": "user", "content": prompt_for_dir_selection}]
-        response = litellm.completion(
-            model=LITELLM_MODEL,
-            messages=messages_for_dir_selection
-        )
-        
-        selected_dir_str = response.choices[0].message.content.strip()
-        logger.info(f"LLM suggested directory path: '{selected_dir_str}'")
-
-        if selected_dir_str.upper() == "UNCLEAR" or not selected_dir_str:
-            return f"I'm not sure which directory you mean from your request: '{full_user_query}'. Could you be more specific from the known locations?"
-
-        # Validate that the selected directory is one of the possibilities
-        # Expanduser and resolve for comparison, as LLM might return it slightly differently but meaning the same path
-        
-        # Normalize LLM output first
-        normalized_selected_dir = str(Path(selected_dir_str).expanduser().resolve())
-
-        # Normalize options from file for comparison
-        normalized_possible_dirs_map = {str(Path(d).expanduser().resolve()): d for d in possible_dirs}
-
-        if normalized_selected_dir not in normalized_possible_dirs_map:
-            logger.warning(f"LLM selected '{selected_dir_str}' (normalized to '{normalized_selected_dir}'), which is not in the predefined list of directories or doesn't resolve to a known one. Known (normalized): {list(normalized_possible_dirs_map.keys())}")
-            return (f"I'm sorry, but '{selected_dir_str}' is not one of the predefined directories I know, or it's ambiguous. "
-                    f"Please choose from the configured locations.")
-
-        # Use the original path string from the file that matches the normalized selected one
-        # This ensures we use the exact string from all_dirs for consistency if needed later
-        final_path_to_change = normalized_possible_dirs_map[normalized_selected_dir]
-        expanded_path = Path(final_path_to_change).expanduser().resolve()
-
-        if not expanded_path.is_dir():
-            logger.error(f"Selected directory '{expanded_path}' (from '{final_path_to_change}') is not a valid directory or does not exist.")
-            return f"Error: The selected directory '{expanded_path}' is not a valid directory or does not exist."
-        
-        CWD_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(CWD_FILE, "w") as f:
-            f.write(str(expanded_path))
+        CWD_FILE.write_text(str(expanded_path))
         logger.info(f"Changed CWD to: {expanded_path}")
-        return f"Okay, I've changed the current directory to {expanded_path}."
-
+        return f"Okay, I've changed the current directory to {expanded_path.name}."
     except Exception as e:
-        logger.error(f"Error during LLM call for directory selection or changing directory: {e}", exc_info=True)
-        return f"Sorry, I had trouble determining which directory to use or changing to it. Error: {str(e)}"
+        logger.error(f"Error writing to CWD file {CWD_FILE}: {e}", exc_info=True)
+        return f"Sorry, I encountered an error while changing the directory. Error: {str(e)}"
 
 @tool_function
-def add_file(full_user_query: str): # Renamed parameter
+def add_file(full_user_query: str):
     """
-    Identifies a Python file to add based on user query and files in the current directory (and subdirectories), then adds it to a persistent context for the current directory.
-    This function recursively lists all Python (.py) files in the current directory that are tracked by Git.
-    It uses an LLM to determine which file the user wants to add.
-    The selected file's path is then stored in ~/.config/max/files_in_context, associated with the current directory.
+    Identifies a Python file to add to a persistent context for the current directory.
     """
-    current_dir_path_str = get_current_directory()
-    current_dir = Path(current_dir_path_str)
+    current_dir_str = get_current_directory()
+    current_dir = Path(current_dir_str)
     
     if not current_dir.is_dir():
-        return f"Error: The current directory '{current_dir_path_str}' is not valid."
+        return f"Error: The current directory '{current_dir_str}' is not valid."
 
     try:
-        # Use git ls-files to get a list of all tracked files recursively.
-        # The command is run in current_dir_path_str, so paths are relative to it.
         process = subprocess.run(
-            ["git", "ls-files"], 
-            cwd=current_dir_path_str,
-            capture_output=True,
-            text=True,
-            check=True  # Will raise CalledProcessError if git command fails
+            ["git", "ls-files"], cwd=current_dir_str, capture_output=True, text=True, check=True
         )
-        
-        all_tracked_files = process.stdout.splitlines()
-        
-        # Filter for Python files and ensure they are actually files.
         python_files = [
-            rel_path for rel_path in all_tracked_files
-            if rel_path.endswith('.py') and (current_dir / rel_path).is_file()
+            path for path in process.stdout.splitlines() 
+            if path.endswith('.py') and (current_dir / path).is_file()
         ]
-        
-    except subprocess.CalledProcessError as e:
-        # This typically means current_dir is not a git repo or git command failed.
-        if "not a git repository" in e.stderr.lower():
-            logger.warning(f"Directory {current_dir_path_str} is not a git repository. Cannot use git ls-files.")
-            return f"The current directory '{current_dir_path_str}' is not a Git repository. I can only list files from Git-tracked directories for this command."
-        logger.error(f"Error running 'git ls-files' in {current_dir_path_str}: {e.stderr}")
-        return f"Sorry, I couldn't list files using Git. Git command failed: {e.stderr}"
-    except FileNotFoundError: # git command itself not found
-        logger.error("'git' command not found. Cannot list files using git ls-files.")
-        return "Sorry, the 'git' command is not installed or not in PATH. I need it to list files."
-    except Exception as e: # Other unexpected errors
-        logger.error(f"Unexpected error listing files with git ls-files in {current_dir_path_str}: {e}")
-        return f"An unexpected error occurred while trying to list files using Git: {str(e)}"
-
-    if not python_files:
-        return f"I couldn't find any Python (.py) files tracked by Git in '{current_dir_path_str}' or its subdirectories."
-
-    items_list_str = "\n".join(f"- {f}" for f in python_files)
-    prompt_for_file_selection = (
-        f"The user wants to add a Python file to the context. Their original request was: '{full_user_query}'.\n"
-        f"Based on the user's request and the following list of available Python files, which single file path do they most likely mean? "
-        f"Respond with only the full file path from the list. If completely unsure, respond with 'UNCLEAR'.\n"
-        f"Available Python files in '{current_dir_path_str}':\n{items_list_str}\n"
-    )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logger.error(f"Error getting git-tracked files in {current_dir_str}: {e}")
+        return "Sorry, I can only add files from Git-tracked directories, and I had trouble listing them."
     
-    logger.info(f"Asking LLM to select file with prompt: {prompt_for_file_selection}")
+    if not python_files:
+        return f"I couldn't find any Python (.py) files tracked by Git in '{current_dir_str}'."
+
+    selected_file = _select_item_with_llm(full_user_query, "Python file", python_files, "add a file to the context")
+
+    if selected_file == "UNCLEAR":
+        return f"I'm not sure which file you mean from your request: '{full_user_query}'. Could you be more specific?"
+    if selected_file.startswith("LLM_ERROR"):
+        return f"Sorry, I had trouble determining which file to add. Error: {selected_file}"
+
+    if selected_file not in python_files:
+        logger.warning(f"LLM selected '{selected_file}', which is not in the list of available files.")
+        return f"I'm sorry, but '{selected_file}' is not among the Python files I found."
 
     try:
-        messages_for_file_selection = [{"role": "user", "content": prompt_for_file_selection}]
-        response = litellm.completion(
-            model=LITELLM_MODEL,
-            messages=messages_for_file_selection
-        )
+        context_data = {}
+        if FILES_IN_CONTEXT_FILE.exists() and FILES_IN_CONTEXT_FILE.stat().st_size > 0:
+            with open(FILES_IN_CONTEXT_FILE, "r") as f:
+                context_data = json.load(f)
         
-        selected_item_name = response.choices[0].message.content.strip()
-        logger.info(f"LLM suggested item name: '{selected_item_name}'")
-
-        if selected_item_name.upper() == "UNCLEAR" or not selected_item_name:
-            return f"I'm not sure which file you mean from your request: '{full_user_query}'. Could you be more specific?"
-
-        # Validate that the selected item is one of the python files found
-        if selected_item_name not in python_files:
-            logger.warning(f"LLM selected '{selected_item_name}', which is not in the list of Python files for {current_dir_path_str}. Files found: {python_files}")
-            return (f"I'm sorry, but '{selected_item_name}' is not among the Python files I found in the current directory "
-                    f"('{current_dir_path_str}'). Please choose from the available files: {', '.join(python_files)}.")
-        
-        # If selected_item_name is in python_files, it's an existing file. Add it to context.
-        try:
-            # Ensure parent directory for context file exists
-            FILES_IN_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-            # Load existing context
-            context_data = {}
-            if FILES_IN_CONTEXT_FILE.exists() and FILES_IN_CONTEXT_FILE.stat().st_size > 0:
-                with open(FILES_IN_CONTEXT_FILE, "r") as f:
-                    context_data = json.load(f)
-            
-            # Get or initialize the list for the current directory
-            files_for_current_dir = context_data.get(current_dir_path_str, [])
-
-            # Add the file if it's not already in the list
-            if selected_item_name not in files_for_current_dir:
-                files_for_current_dir.append(selected_item_name)
-                context_data[current_dir_path_str] = files_for_current_dir
-
-                # Write the updated context back to the file
-                with open(FILES_IN_CONTEXT_FILE, "w") as f:
-                    json.dump(context_data, f, indent=2)
-                
-                action_taken_msg = f"Okay, I've added the file '{selected_item_name}' to the context for the current directory."
-                logger.info(f"Added '{selected_item_name}' to context for '{current_dir_path_str}' in {FILES_IN_CONTEXT_FILE}")
-            else:
-                action_taken_msg = f"The file '{selected_item_name}' is already in the context for this directory."
-                logger.info(f"File '{selected_item_name}' already in context for '{current_dir_path_str}'. No change made.")
-
-            return action_taken_msg
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Error decoding JSON from {FILES_IN_CONTEXT_FILE}: {e}")
-            return f"Sorry, I couldn't update the context file because it seems to be corrupted. Please check the file: {FILES_IN_CONTEXT_FILE}"
-        except Exception as e:
-            logger.error(f"Error updating context file {FILES_IN_CONTEXT_FILE}: {e}", exc_info=True)
-            return f"Sorry, I encountered an unexpected error while trying to update the file context. Error: {str(e)}"
-
+        files_for_dir = context_data.setdefault(current_dir_str, [])
+        if selected_file not in files_for_dir:
+            files_for_dir.append(selected_file)
+            with open(FILES_IN_CONTEXT_FILE, "w") as f:
+                json.dump(context_data, f, indent=2)
+            logger.info(f"Added '{selected_file}' to context for '{current_dir_str}'")
+            return f"Okay, I've added the file '{selected_file}' to the context."
+        else:
+            return f"The file '{selected_file}' is already in the context for this directory."
     except Exception as e:
-        logger.error(f"Error during LLM call for file selection or processing: {e}")
-        return f"Sorry, I had trouble determining which file to add. Error: {str(e)}"
+        logger.error(f"Error updating context file {FILES_IN_CONTEXT_FILE}: {e}", exc_info=True)
+        return f"Sorry, I encountered an error updating the file context. Error: {str(e)}"
 
 @tool_function
 def set_coding_model(full_user_query: str):
     """
-    Sets the coding model alias by selecting from a list of available models provided by 'ca -l'.
-    This function shells out to 'ca -l' to get a list of models and their aliases.
-    It then uses an LLM to determine which model alias the user intends to set based on their query.
-    The selected alias is then saved to ~/.config/max/coding_model_alias for other tools to use.
+    Sets the coding model alias by selecting from a list of available models from 'ca -l'.
     """
     try:
-        process = subprocess.run(
-            ["ca", "-l"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
+        process = subprocess.run(["ca", "-l"], capture_output=True, text=True, check=True)
         ca_output = process.stdout
-    except FileNotFoundError:
-        logger.error("'ca' command not found. It's required for setting the coding model.")
-        return "Sorry, the 'ca' command (from config-aider) is not installed or not in your PATH. I need it to list and set coding models."
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error running 'ca -l': {e.stderr}")
-        return f"Sorry, I couldn't get the list of models. The 'ca -l' command failed: {e.stderr}"
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        logger.error(f"Error running 'ca -l': {e}")
+        return "Sorry, I need the 'ca' command to set the coding model, and it's not working."
 
-    # Parse the output to build a map of available model names/aliases to the alias to be stored.
     name_to_alias_map = {}
     alias_regex = re.compile(r'\(aliases: ([^\)]+)\)')
-
     for line in ca_output.strip().splitlines():
-        if not line.strip() or ':' not in line:
-            continue
-
+        if ':' not in line: continue
         model_name = line.split(':')[0].strip()
         match = alias_regex.search(line)
-
         if match:
-            aliases_str = match.group(1)
-            aliases = [a.strip() for a in aliases_str.split(',')]
+            aliases = [a.strip() for a in match.group(1).split(',')]
             if aliases:
-                primary_alias = aliases[0] # Use the first alias as the one to store
+                primary_alias = aliases[0]
                 name_to_alias_map[model_name] = primary_alias
                 for alias in aliases:
                     name_to_alias_map[alias] = alias
 
     if not name_to_alias_map:
-        return "I ran 'ca -l' but couldn't find any models with defined aliases. Please configure aliases in config-aider first."
+        return "I ran 'ca -l' but couldn't find any models with defined aliases."
 
     available_choices = sorted(list(name_to_alias_map.keys()))
-    choices_list_str = "\n".join(f"- {choice}" for choice in available_choices)
+    selected_choice = _select_item_with_llm(full_user_query, "model or alias", available_choices, "set the coding model")
 
-    prompt_for_selection = (
-        f"The user wants to set the coding model. Their original request was: '{full_user_query}'.\n"
-        f"Based on their request and the following list of available models and aliases, which single option do they most likely mean? "
-        f"Respond with only the name or alias from the list. If completely unsure, respond with 'UNCLEAR'.\n"
-        f"Available options:\n{choices_list_str}\n"
-    )
+    if selected_choice == "UNCLEAR":
+        return f"I'm not sure which coding model you mean from your request: '{full_user_query}'."
+    if selected_choice.startswith("LLM_ERROR"):
+        return f"Sorry, I had trouble determining which model to set. Error: {selected_choice}"
 
-    logger.info(f"Asking LLM to select coding model with prompt: {prompt_for_selection}")
+    if selected_choice not in name_to_alias_map:
+        logger.warning(f"LLM selected '{selected_choice}', which is not a valid option.")
+        return f"I'm sorry, but '{selected_choice}' is not a valid model or alias I can set."
 
+    alias_to_save = name_to_alias_map[selected_choice]
     try:
-        messages_for_selection = [{"role": "user", "content": prompt_for_selection}]
-        response = litellm.completion(
-            model=LITELLM_MODEL,
-            messages=messages_for_selection
-        )
-        
-        selected_choice = response.choices[0].message.content.strip()
-        logger.info(f"LLM suggested coding model/alias: '{selected_choice}'")
-
-        if selected_choice.upper() == "UNCLEAR" or not selected_choice:
-            return f"I'm not sure which coding model you mean from your request: '{full_user_query}'. Could you be more specific?"
-
-        if selected_choice not in name_to_alias_map:
-            logger.warning(f"LLM selected '{selected_choice}', which is not in the list of available options.")
-            return f"I'm sorry, but '{selected_choice}' is not a valid model or alias I can set."
-
-        alias_to_save = name_to_alias_map[selected_choice]
-
-        try:
-            CODING_MODEL_ALIAS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(CODING_MODEL_ALIAS_FILE, "w") as f:
-                f.write(alias_to_save)
-            logger.info(f"Set coding model alias to '{alias_to_save}' in {CODING_MODEL_ALIAS_FILE}")
-            return f"Okay, I've set the coding model alias to {alias_to_save}."
-        except Exception as e:
-            logger.error(f"Error writing to coding model alias file {CODING_MODEL_ALIAS_FILE}: {e}", exc_info=True)
-            return f"Sorry, I encountered an error while trying to save the coding model alias. Error: {str(e)}"
-
+        CODING_MODEL_ALIAS_FILE.write_text(alias_to_save)
+        logger.info(f"Set coding model alias to '{alias_to_save}'")
+        return f"Okay, I've set the coding model alias to {alias_to_save}."
     except Exception as e:
-        logger.error(f"Error during LLM call for coding model selection: {e}", exc_info=True)
-        return f"Sorry, I had trouble determining which coding model to set. Error: {str(e)}"
+        logger.error(f"Error writing to coding model alias file {CODING_MODEL_ALIAS_FILE}: {e}", exc_info=True)
+        return f"Sorry, I couldn't save the coding model alias. Error: {str(e)}"
 
 @tool_function
 def update_code(full_user_query: str):
     """
     Updates code in the files currently in context using the configured coding model.
     """
-    # 1. Get coding model alias
     try:
         if not CODING_MODEL_ALIAS_FILE.exists() or CODING_MODEL_ALIAS_FILE.stat().st_size == 0:
-            return "The coding model alias is not set. Please set it first using the 'set coding model' command."
-        with open(CODING_MODEL_ALIAS_FILE, "r") as f:
-            coding_model_alias = f.read().strip()
+            return "The coding model alias is not set. Please set it first."
+        coding_model_alias = CODING_MODEL_ALIAS_FILE.read_text().strip()
     except Exception as e:
-        logger.error(f"Error reading coding model alias file {CODING_MODEL_ALIAS_FILE}: {e}")
         return f"Sorry, I had trouble reading the coding model alias. Error: {str(e)}"
 
-    # 2. Get files in context
-    current_dir_path_str = get_current_directory()
+    current_dir_str = get_current_directory()
     files_in_context = []
     try:
         if FILES_IN_CONTEXT_FILE.exists() and FILES_IN_CONTEXT_FILE.stat().st_size > 0:
-            with open(FILES_IN_CONTEXT_FILE, "r") as f:
-                context_data = json.load(f)
-            files_in_context = context_data.get(current_dir_path_str, [])
-        
+            context_data = json.loads(FILES_IN_CONTEXT_FILE.read_text())
+            files_in_context = context_data.get(current_dir_str, [])
         if not files_in_context:
-            return "There are no files in the context for the current directory. Please add files first using the 'add file' command."
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON from {FILES_IN_CONTEXT_FILE}: {e}")
-        return f"Sorry, I couldn't read the context file because it seems to be corrupted. Please check the file: {FILES_IN_CONTEXT_FILE}"
+            return "There are no files in the context for the current directory. Please add files first."
     except Exception as e:
-        logger.error(f"Error reading context file {FILES_IN_CONTEXT_FILE}: {e}")
-        return f"Sorry, I encountered an unexpected error while reading the file context. Error: {str(e)}"
+        return f"Sorry, I had trouble reading the file context. Error: {str(e)}"
 
-    # 3. Construct and execute the command
     command = ["ca", coding_model_alias] + files_in_context + ["-m", full_user_query]
-    
     logger.info(f"Executing code update command: {' '.join(command)}")
 
     try:
-        # We run this from the current directory of the assistant
-        process = subprocess.run(
-            command,
-            cwd=current_dir_path_str,
-            capture_output=True,
-            text=True,
-            # Not using check=True, as 'ca' might return non-zero exit codes for various reasons.
-            # We'll return the output to the user regardless.
-        )
-        
-        stdout = process.stdout.strip()
-        stderr = process.stderr.strip()
+        process = subprocess.run(command, cwd=current_dir_str, capture_output=True, text=True)
+        stdout, stderr = process.stdout.strip(), process.stderr.strip()
         
         logger.info(f"'ca' command stdout: {stdout}")
-        if stderr:
-            logger.warning(f"'ca' command stderr: {stderr}")
+        if stderr: logger.warning(f"'ca' command stderr: {stderr}")
 
         if stderr and not stdout:
-            # If there's only stderr, it's likely a pure error message.
             return f"The code update command failed with an error: {stderr}"
         
-        # Combine stdout and stderr for the response, as 'ca' might print progress to stderr.
         response = stdout
         if stderr:
             response += f"\n\nNotes from the process:\n{stderr}"
-
-        if not response:
-            return "The code update command ran but produced no output."
-
-        return response
-
+        
+        return response or "The code update command ran but produced no output."
     except FileNotFoundError:
-        logger.error("'ca' command not found. It's required for updating code.")
-        return "Sorry, the 'ca' command (from config-aider) is not installed or not in your PATH. I need it to update code."
+        return "Sorry, the 'ca' command is not installed or not in your PATH. I need it to update code."
     except Exception as e:
         logger.error(f"An unexpected error occurred while running 'ca': {e}", exc_info=True)
         return f"An unexpected error occurred while trying to update code: {str(e)}"
@@ -560,307 +433,170 @@ def update_code(full_user_query: str):
 # --- STT and Main Assistant Logic ---
 
 def handle_llm_interaction(user_query: str) -> Optional[str]:
-    """
-    Handles the core interaction with the LLM, including tool calls.
-    Returns the final textual response from the LLM, or None if no specific response.
-    """
-    logger.info(f"Core LLM interaction for query: \"{user_query}\"")
+    """Handles the core interaction with the LLM, including tool calls."""
+    logger.info(f'Core LLM interaction for query: "{user_query}"')
     ensure_tools_loaded()
 
     system_prompt = (
-        "You are a voice assistant named Max. Your primary purpose is to take action by calling tools in response to user commands. "
-        "The user has invoked you by name, so you must try to use one of your tools. "
+        "You are a voice assistant named Max. Your primary purpose is to take action by calling tools. "
         "Analyze the user's request and select the most appropriate tool. "
         "Your responses will be spoken out loud, so be concise and use natural, conversational language. "
-        "Avoid complex punctuation like markdown, bullet points, or long lists that are hard to read aloud. "
-        "When a tool has been used successfully, provide a brief confirmation. "
+        "Avoid complex punctuation. When a tool is used, provide a brief confirmation. "
         "Do not engage in chit-chat; your value is in successfully executing tools."
     )
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_query}]
 
-    if not _cached_tool_schemas or not _cached_function_dispatch_table:
+    if not _cached_tool_schemas:
         logger.warning("No tools available. Attempting basic chat.")
         try:
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_query}
-            ]
             response = litellm.completion(model=LITELLM_MODEL, messages=messages)
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"Error in basic LLM completion: {e}")
             return "Sorry, I had trouble processing that."
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_query}
-    ]
     try:
-        response_obj = litellm.completion(
-            model=LITELLM_MODEL,
-            messages=messages,
-            tools=_cached_tool_schemas,
-            tool_choice="auto"
-        )
-        
+        response_obj = litellm.completion(model=LITELLM_MODEL, messages=messages, tools=_cached_tool_schemas, tool_choice="auto")
         response_message = response_obj.choices[0].message
         tool_calls = response_message.tool_calls
 
-        if tool_calls:
-            logger.info(f"LLM returned tool calls: {tool_calls}")
-            messages.append(response_message) # Add assistant's decision to call tool(s)
+        if not tool_calls:
+            logger.info("LLM did not return any tool calls. Using direct response.")
+            return response_message.content
 
-            for tool_call in tool_calls:
-                function_name = tool_call.function.name
-                if function_name not in _cached_function_dispatch_table:
-                    logger.error(f"LLM requested unknown function: {function_name}")
-                    messages.append({
-                        "tool_call_id": tool_call.id, "role": "tool", "name": function_name,
-                        "content": f"Error: Function {function_name} is not recognized."
-                    })
-                    continue
+        logger.info(f"LLM returned tool calls: {tool_calls}")
+        messages.append(response_message)
 
-                function_to_call = _cached_function_dispatch_table[function_name]
+        for tool_call in tool_calls:
+            function_name = tool_call.function.name
+            function_to_call = _cached_function_dispatch_table.get(function_name)
+
+            if not function_to_call:
+                logger.error(f"LLM requested unknown function: {function_name}")
+                content = f"Error: Function {function_name} is not recognized."
+            else:
                 try:
-                    args_str = tool_call.function.arguments
-                    args_dict = json.loads(args_str)
-                    
-                    func_sig = inspect.signature(function_to_call)
-                    if MAGIC_QUERY_PARAM_NAME in func_sig.parameters:
+                    args_dict = json.loads(tool_call.function.arguments)
+                    if MAGIC_QUERY_PARAM_NAME in inspect.signature(function_to_call).parameters:
                         args_dict[MAGIC_QUERY_PARAM_NAME] = user_query
-                        logger.info(f"Injected magic param '{MAGIC_QUERY_PARAM_NAME}' for {function_name}")
                     
                     logger.info(f"Calling tool: {function_name} with args: {args_dict}")
-                    tool_response_content = function_to_call(**args_dict)
+                    content = function_to_call(**args_dict)
                 except Exception as e:
-                    logger.error(f"Error executing tool {function_name} with args '{args_str}': {e}")
-                    tool_response_content = f"Error executing {function_name}: {str(e)}"
-                
-                logger.info(f"Tool {function_name} response: {tool_response_content}")
-                messages.append({
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "name": function_name,
-                    "content": str(tool_response_content) # Ensure string
-                })
+                    logger.error(f"Error executing tool {function_name}: {e}", exc_info=True)
+                    content = f"Error executing {function_name}: {str(e)}"
             
-            logger.info(f"Sending tool responses to LLM for final summarization with messages: {messages}")
-            final_response_obj = litellm.completion(model=LITELLM_MODEL, messages=messages)
-            logger.info("Got response from LLM.")
-            return final_response_obj.choices[0].message.content
-        else: # No tool_calls
-            logger.info("LLM did not return any tool calls. Using direct response.")
-            return response_message.content # This could be None if LLM sends empty content
+            messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": str(content)})
+        
+        final_response_obj = litellm.completion(model=LITELLM_MODEL, messages=messages)
+        return final_response_obj.choices[0].message.content
 
     except Exception as e:
         logger.error(f"Error in LLM completion or tool processing: {e}", exc_info=True)
         return "Sorry, I encountered an error while processing your request."
-    # Fallback, should ideally be unreachable if all paths above return something.
-    return None
-
-
-_recorder_instance: Optional[AudioToTextRecorder] = None
-_cached_tool_schemas: Optional[List[Dict[str, Any]]] = None
-_cached_function_dispatch_table: Optional[Dict[str, Callable]] = None
 
 def ensure_tools_loaded():
     """Loads tool schemas and dispatch table if not already loaded."""
     global _cached_tool_schemas, _cached_function_dispatch_table
-    if _cached_tool_schemas is None or _cached_function_dispatch_table is None:
+    if _cached_tool_schemas is None:
         _cached_tool_schemas = get_all_tool_schemas()
         _cached_function_dispatch_table = {
-            tool_schema["function"]["name"]: _tool_functions[tool_schema["function"]["name"]]
-            for tool_schema in _cached_tool_schemas
+            tool["function"]["name"]: _tool_functions[tool["function"]["name"]]
+            for tool in _cached_tool_schemas
         }
-        logger.info(f"Tools loaded: {[name for name in _cached_function_dispatch_table.keys()]}")
+        logger.info(f"Tools loaded: {list(_cached_function_dispatch_table.keys())}")
 
 def process_transcription(transcribed_text: str):
-    """Processes transcribed text, checks for wake word, and interacts with LLM and tools."""
+    """Processes transcribed text, checks for wake word, and interacts with LLM."""
     global _recorder_instance
-    logger.info(f"Processing transcription: \"{transcribed_text}\"")
+    logger.info(f'Processing transcription: "{transcribed_text}"')
     
     if WAKE_WORD.lower() not in transcribed_text.lower():
-        logger.info(f"Wake word '{WAKE_WORD}' not detected in transcription. Ignoring.")
+        logger.info(f"Wake word '{WAKE_WORD}' not detected. Ignoring.")
         return
     
-    try:
-        query_parts = transcribed_text.lower().split(WAKE_WORD.lower(), 1)
-        user_query = query_parts[1].strip() if len(query_parts) > 1 and query_parts[1].strip() else transcribed_text
-    except Exception:
-        user_query = transcribed_text # Fallback
+    query_parts = transcribed_text.lower().split(WAKE_WORD.lower(), 1)
+    user_query = query_parts[1].strip() if len(query_parts) > 1 and query_parts[1].strip() else transcribed_text
     
-    logger.info(f"User query for LLM (from transcription): \"{user_query}\"")
-
+    logger.info(f'User query for LLM: "{user_query}"')
     final_content = handle_llm_interaction(user_query)
 
-    if final_content is not None:
-        if _recorder_instance:
-            logger.info("Pausing recorder for speech output.")
-            _recorder_instance.pause_recording = True
-        
+    if final_content is not None and _recorder_instance:
+        _recorder_instance.pause_recording = True
         try:
-            if final_content: # This includes error messages from handle_llm_interaction
-                speak(final_content)
-            elif final_content == "": # Explicitly empty string from LLM (e.g. after tools, no summary)
-                speak("Done.")
+            speak(final_content or "Done.")
         finally:
-            if _recorder_instance:
-                logger.info("Resuming recorder.")
-                _recorder_instance.pause_recording = False
-    # If final_content is None (e.g. LLM gave no tools, no direct content, and no error), 
-    # nothing is spoken, aligning with original behavior of ignoring if no tool selected and no direct answer.
+            _recorder_instance.pause_recording = False
 
 def process_text_query(user_query: str):
     """Processes a text query, interacts with LLM/tools, and prints the response."""
-    logger.info(f"Processing text query: \"{user_query}\"")
-    
+    logger.info(f'Processing text query: "{user_query}"')
     final_content = handle_llm_interaction(user_query)
-
-    if final_content: # This includes error messages from handle_llm_interaction
+    
+    if final_content:
         print(f"{ASSISTANT_NAME}: {final_content}")
-    elif final_content == "": # Explicitly empty string from LLM
+    elif final_content == "":
         print(f"{ASSISTANT_NAME}: Done.")
-    else: # final_content is None (no tools, no direct content, no error)
+    else:
         print(f"{ASSISTANT_NAME}: I processed your request, but there was no specific information to return.")
 
 def main_assistant_loop():
     """Initializes STT and runs the main loop for voice interaction."""
     global _recorder_instance
-    # Warnings about ElevenLabs API key or 'say' command availability are handled
-    # in cli_main or by the speak() function's fallbacks.
-
-    ensure_tools_loaded() # Load tools at startup
+    ensure_tools_loaded()
 
     recorder_config = {
         "spinner": False, "model": os.getenv("STT_MODEL", "tiny.en"), "language": "en",
         "post_speech_silence_duration": float(os.getenv("STT_SILENCE_DURATION", 1.2)),
         "beam_size": int(os.getenv("STT_BEAM_SIZE", 5)),
-        "print_transcription_time": False,
-        "realtime_processing_pause": 0.2,
+        "print_transcription_time": False, "realtime_processing_pause": 0.2,
     }
     logger.info(f"Initializing RealtimeSTT with config: {recorder_config}")
     
     try:
         _recorder_instance = AudioToTextRecorder(**recorder_config)
     except Exception as e:
-        logger.error(f"Failed to initialize AudioToTextRecorder: {e}. Voice assistant cannot start.")
-        print(f"Error: Could not start audio recorder. Ensure microphone is available and permissions are set. Details: {e}")
+        logger.error(f"Failed to initialize AudioToTextRecorder: {e}. Voice assistant cannot start.", exc_info=True)
+        print(f"Error: Could not start audio recorder. Details: {e}")
         return
 
-    # Re-assert logging configuration for the application's logger
-    # This helps ensure our logs appear as intended, even if libraries modify root logging settings.
-    logger.setLevel(logging.INFO) # Set desired level for our logger
-
-    # Remove any handlers that might have been attached to this specific logger by other libraries,
-    # or to reset its handlers to a known state.
-    if logger.hasHandlers():
-        for handler in logger.handlers[:]: # Iterate over a copy of the list
-            logger.removeHandler(handler)
-
-    # Add our desired handler
-    app_handler = logging.StreamHandler() # Defaults to sys.stderr
-    # Use the same format as basicConfig
-    app_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    app_handler.setFormatter(app_formatter)
-    # The handler will respect the logger's level (INFO), 
-    # so no need to setLevel on handler unless a more restrictive level is needed for this specific handler.
-    logger.addHandler(app_handler)
-
-    # Prevent messages from this logger from propagating to the root logger.
-    # This is important if the root logger's handlers have been altered by libraries.
-    logger.propagate = False
-        
     logger.info(f"'{ASSISTANT_NAME}' is listening... Say '{WAKE_WORD}' followed by your command.")
     speak(f"Hello! I'm {ASSISTANT_NAME}. How can I assist you today?")
 
     try:
         while True:
             transcribed_text = _recorder_instance.text()
-            if transcribed_text: # Process if not empty
+            if transcribed_text:
                 process_transcription(transcribed_text)
     except KeyboardInterrupt:
-        logger.info(f"'{ASSISTANT_NAME}' assistant stopped by user.")
         speak("Goodbye!")
     except Exception as e:
         logger.error(f"An unexpected error occurred in the main loop: {e}", exc_info=True)
         speak("An unexpected error occurred. Shutting down.")
     finally:
-        logger.info("Cleaning up assistant resources.")
-        # RealtimeSTT recorder usually cleans itself up or doesn't require explicit stop for this usage.
+        logger.info(f"'{ASSISTANT_NAME}' assistant stopped.")
 
 # --- CLI ---
 def cli_main():
+    """Command Line Interface for the assistant."""
     parser = argparse.ArgumentParser(description=f"{ASSISTANT_NAME} Voice Assistant")
-    parser.add_argument(
-        "--tools",
-        action="store_true",
-        help="Dump the tool call metadata (JSON schemas for functions) and exit.",
-    )
-    parser.add_argument(
-        "--elevenlabs",
-        action="store_true",
-        help="Use ElevenLabs for Text-to-Speech instead of the default 'say' command (macOS).",
-    )
-    parser.add_argument(
-        "-q", "--query",
-        type=str,
-        help="Process a text query directly, print the response, and exit. Bypasses voice input/output.",
-    )
+    parser.add_argument("--tools", action="store_true", help="Dump tool schemas and exit.")
+    parser.add_argument("--elevenlabs", action="store_true", help="Use ElevenLabs for TTS.")
+    parser.add_argument("-q", "--query", type=str, help="Process a text query and exit.")
     args = parser.parse_args()
 
-    global USE_ELEVENLABS_TTS
-    global elevenlabs_client # Allow modification of the global client
+    _setup_logging()
+    _create_config_dir_if_not_exists()
 
-    if args.elevenlabs:
-        USE_ELEVENLABS_TTS = True
-        logger.info("ElevenLabs TTS explicitly enabled via --elevenlabs flag.")
-        if ELEVENLABS_API_KEY:
-            try:
-                elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-                logger.info("ElevenLabs client initialized successfully.")
-            except Exception as e:
-                logger.error(f"Failed to initialize ElevenLabs client: {e}. ElevenLabs TTS will not be available.")
-                USE_ELEVENLABS_TTS = False # Disable if client fails to init
-        else:
-            logger.warning("ElevenLabs TTS enabled via flag, but ELEVEN_API_KEY is not set. ElevenLabs TTS will not be available.")
-            USE_ELEVENLABS_TTS = False # Disable if no API key
-    
     if args.tools:
-        ensure_tools_loaded() # Ensure tools are discovered
+        ensure_tools_loaded()
         print(json.dumps(_cached_tool_schemas, indent=2))
         sys.exit(0)
     
     if args.query:
-        # Ensure CWD file and its directory exist before processing query
-        if not CWD_FILE.parent.exists():
-            CWD_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if not CWD_FILE.exists():
-            get_current_directory() # This will create it with default if not present
         process_text_query(args.query)
-        sys.exit(0)
     else:
-        # Ensure CWD file and its directory exist before starting assistant
-        if not CWD_FILE.parent.exists():
-            CWD_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if not CWD_FILE.exists():
-            get_current_directory() # This will create it with default if not present
-        
-        # Initialize TTS-related components only if not in text query mode
-        if args.elevenlabs: # This check is repeated, but ensures context for USE_ELEVENLABS_TTS
-            USE_ELEVENLABS_TTS = True # Re-affirm based on args
-            logger.info("ElevenLabs TTS explicitly enabled via --elevenlabs flag for voice mode.")
-            if ELEVENLABS_API_KEY:
-                try:
-                    elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-                    logger.info("ElevenLabs client initialized successfully for voice mode.")
-                except Exception as e:
-                    logger.error(f"Failed to initialize ElevenLabs client for voice mode: {e}. ElevenLabs TTS will not be available.")
-                    USE_ELEVENLABS_TTS = False 
-            else:
-                logger.warning("ElevenLabs TTS enabled via flag for voice mode, but ELEVEN_API_KEY is not set. ElevenLabs TTS will not be available.")
-                USE_ELEVENLABS_TTS = False
-        
-        check_say_command() # Check for 'say' command only in voice mode
-            
+        _initialize_tts(args.elevenlabs)
         main_assistant_loop()
 
 if __name__ == "__main__":
